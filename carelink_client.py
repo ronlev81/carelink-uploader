@@ -52,8 +52,21 @@ class CareLinkClient:
                     latest = max(readings, key=lambda x: x.get("ts", 0))
                     print(f"Latest: sg={latest.get('sg')} ts={latest.get('ts')}")
                     return latest
-                else:
-                    print(f"Unexpected structure: {str(data)[:300]}")
+
+                # Navigate ResponsePayload → mgdl → Agg1d → sgVal
+                try:
+                    agg = data["ResponsePayload"]["mgdl"]["Agg1d"]
+                    all_sg = []
+                    for day in agg:
+                        all_sg.extend(day.get("sgVal", []))
+                    if all_sg:
+                        latest = max(all_sg, key=lambda x: x.get("ts", 0))
+                        print(f"Latest: sg={latest.get('sg')} ts={latest.get('ts')}")
+                        return latest
+                except (KeyError, TypeError):
+                    pass
+
+                print(f"Unexpected structure: {str(data)[:300]}")
             except Exception as e:
                 print(f"Parse error: {e} — {r.text[:300]}")
         elif r.status_code == 401:
