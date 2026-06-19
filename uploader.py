@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import hashlib
 import requests
@@ -8,6 +9,7 @@ from carelink_client import CareLinkClient
 NS_HOST    = os.environ['NS_HOST'].rstrip('/')
 API_SECRET = os.environ['API_SECRET']
 INTERVAL   = int(os.environ.get('UPLOAD_INTERVAL', '300'))
+PATIENT_ID = os.environ.get('PATIENT_ID', 'patient_001')
 
 API_SECRET_HASH = hashlib.sha1(API_SECRET.encode()).hexdigest()
 NS_HEADERS = {'API-SECRET': API_SECRET_HASH, 'Content-Type': 'application/json'}
@@ -19,6 +21,79 @@ TREND_MAP = {
     'RAPIDLY_DOWN': 'DoubleDown',
 }
 
+# Nightscout → Firestore trend values (match VoiceCare GlucoseTrend type)
+NS_TO_TREND = {
+    'DoubleUp': 'risingFast', 'SingleUp': 'rising', 'FortyFiveUp': 'rising',
+    'Flat': 'stable', 'NONE': 'stable',
+    'FortyFiveDown': 'falling', 'SingleDown': 'falling', 'DoubleDown': 'fallingFast',
+}
+
+# --- Firestore setup (optional — skipped if FIREBASE_SERVICE_ACCOUNT not set) ---
+_fs = None
+
+def _init_firestore():
+    global _fs
+    sa_json = os.environ.get('FIREBASE_SERVICE_ACCOUNT')
+    if not sa_json:
+        print('Firestore: FIREBASE_SERVICE_ACCOUNT not set — skipping Firestore writes')
+        return
+    try:
+        import firebase_admin
+        from firebase_admin import credentials, firestore
+        if not firebase_admin._apps:
+            sa = json.loads(sa_json)
+            cred = credentials.Certificate(sa)
+            firebase_admin.initialize_app(cred)
+        _fs = firestore.client()
+        print('Firestore: connected')
+    except Exception as e:
+        print(f'Firestore init error: {e}')
+
+
+def write_to_firestore(data):
+    if not _fs:
+        return
+    try:
+        s7   = data.get('stats7d',    {})
+        s14  = data.get('stats14d',   {})
+        s30  = data.get('stats30d',   {})
+        stod = data.get('statsToday', {})
+        pi   = data.get('pumpInfo',   {})
+        ns_trend = TREND_MAP.get(data.get('trend', 'NONE'), 'NONE')
+        trend    = NS_TO_TREND.get(ns_trend, 'stable')
+        now = datetime.now(timezone.utc).isoformat()
+
+        meta = _fs.collection('patients').document(PATIENT_ID).collection('meta')
+
+        meta.document('latestVitals').set({
+            'glucose':   data['glucose'],
+            'trend':     trend,
+            'updatedAt': now,
+        }, merge=True)
+
+        meta.document('latestPump').set({
+            'pumpModel':   pi.get('pumpModel'),
+            'sensorModel': pi.get('sensorModel'),
+            'autoMode':    stod.get('autoMode'),
+            'updatedAt':   now,
+        }, merge=True)
+
+        meta.document('latestStats').set({
+            'today': {k: v for k, v in stod.items() if v is not None},
+            '7d':    {k: v for k, v in s7.items()   if v is not None},
+            '14d':   {k: v for k, v in s14.items()  if v is not None},
+            '30d':   {k: v for k, v in s30.items()  if v is not None},
+            'pumpModel':   pi.get('pumpModel'),
+            'sensorModel': pi.get('sensorModel'),
+            'updatedAt':   now,
+        })
+
+        print(f'Firestore: written — sg={data["glucose"]} TIR7d={s7.get("tirNormal")}%')
+    except Exception as e:
+        print(f'Firestore write error: {e}')
+
+
+# --- Nightscout ---
 
 def upload_glucose(glucose, trend_raw):
     trend = TREND_MAP.get(trend_raw, 'NONE')
@@ -33,61 +108,34 @@ def upload_glucose(glucose, trend_raw):
 
 
 def upload_devicestatus(data):
-    """Upload pump status + TIR/avg/TDD stats to Nightscout devicestatus."""
     s7   = data.get('stats7d',  {})
     s14  = data.get('stats14d', {})
     s30  = data.get('stats30d', {})
     stod = data.get('statsToday', {})
+    pi   = data.get('pumpInfo', {})
 
-    pump_info = data.get('pumpInfo', {})
     status = {
         'device': 'Medtronic780G',
         'created_at': datetime.now(timezone.utc).isoformat(),
         'pump': {
             'autoMode':    stod.get('autoMode'),
-            'pumpModel':   pump_info.get('pumpModel'),
-            'sensorModel': pump_info.get('sensorModel'),
+            'pumpModel':   pi.get('pumpModel'),
+            'sensorModel': pi.get('sensorModel'),
         },
         'cgmStats': {
-            'today': {
-                'tirNormal':  stod.get('tirNormal'),
-                'tirHigh':    stod.get('tirHigh'),
-                'tirExtHigh': stod.get('tirExtHigh'),
-                'tirLow':     stod.get('tirLow'),
-                'avgSG':      stod.get('avgSG'),
-            },
-            '7d': {
-                'tirNormal':  s7.get('tirNormal'),
-                'tirHigh':    s7.get('tirHigh'),
-                'tirExtHigh': s7.get('tirExtHigh'),
-                'tirLow':     s7.get('tirLow'),
-                'avgSG':      s7.get('avgSG'),
-                'tdd':        s7.get('tdd'),
-                'autoMode':   s7.get('autoMode'),
-            },
-            '14d': {
-                'tirNormal':  s14.get('tirNormal'),
-                'tirHigh':    s14.get('tirHigh'),
-                'tirExtHigh': s14.get('tirExtHigh'),
-                'avgSG':      s14.get('avgSG'),
-                'tdd':        s14.get('tdd'),
-            },
-            '30d': {
-                'tirNormal':  s30.get('tirNormal'),
-                'tirHigh':    s30.get('tirHigh'),
-                'tirExtHigh': s30.get('tirExtHigh'),
-                'avgSG':      s30.get('avgSG'),
-                'tdd':        s30.get('tdd'),
-            },
+            'today': stod,
+            '7d':    s7,
+            '14d':   s14,
+            '30d':   s30,
         },
     }
-
     r = requests.post(f'{NS_HOST}/api/v1/devicestatus', json=[status], headers=NS_HEADERS)
     print(f'NS devicestatus: {r.status_code} — TIR7d={s7.get("tirNormal")}% avg7d={s7.get("avgSG")} TDD7d={s7.get("tdd")}u')
 
 
 def main():
     print('Starting CareLink uploader...')
+    _init_firestore()
     client = CareLinkClient()
     if not client.login():
         print('Login failed')
@@ -100,6 +148,7 @@ def main():
             if data and data.get('glucose'):
                 upload_glucose(data['glucose'], data.get('trend', 'NONE'))
                 upload_devicestatus(data)
+                write_to_firestore(data)
             else:
                 print('No glucose reading')
         except Exception as e:
