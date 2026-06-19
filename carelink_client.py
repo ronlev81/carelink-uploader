@@ -1,15 +1,11 @@
 """
-CareLink EU client.
-Auth strategy:
-  1. GET /patient/sso/login  → follows to Auth0 /u/login?state=XXX
-  2. POST credentials directly to that same URL (Auth0 ULP accepts it)
-  3. Auth0 redirects → CareLink callback → session cookie set
-  4. GET /patient/connect/data with session cookie
+CareLink EU client using Playwright headless browser.
+Playwright navigates the Auth0 login page like a real browser,
+then transfers session cookies to a requests session for fast data polling.
 """
-import re
 import time
 import requests
-from urllib.parse import urlparse, parse_qs
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 CARELINK_EU_BASE = "https://carelink.minimed.eu"
 
@@ -22,69 +18,70 @@ class CareLinkClient:
         self.session  = requests.Session()
         self.session.headers.update({
             "User-Agent": (
-                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-                "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
             ),
-            "Accept":          "text/html,application/xhtml+xml,*/*;q=0.9",
-            "Accept-Language": "en-US,en;q=0.9",
         })
 
     def login(self) -> bool:
-        # Step 1: follow SSO redirect to Auth0 login page
-        r1 = self.session.get(
-            f"{CARELINK_EU_BASE}/patient/sso/login",
-            params={"country": self.country, "lang": "en"},
-            allow_redirects=True,
-        )
-        login_url = r1.url
-        print(f"Auth0 login page: {r1.status_code} → {login_url[:90]}")
+        print("Launching headless browser...")
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
+            context = browser.new_context()
+            page    = context.new_page()
 
-        if r1.status_code != 200 or "login" not in login_url:
-            print("ERROR: did not reach Auth0 login page")
-            return False
+            try:
+                # Navigate to CareLink SSO → Auth0
+                url = (f"{CARELINK_EU_BASE}/patient/sso/login"
+                       f"?country={self.country}&lang=en")
+                page.goto(url, wait_until="networkidle", timeout=30000)
+                print(f"Reached: {page.url[:80]}")
 
-        # Step 2: POST credentials to the SAME URL (Auth0 ULP accepts POST here)
-        payload = {
-            "username": self.username,
-            "password": self.password,
-            "action":   "default",
-        }
-        r2 = self.session.post(
-            login_url,
-            data=payload,
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Referer":      login_url,
-                "Origin":       f"https://{urlparse(login_url).netloc}",
-            },
-            allow_redirects=True,
-        )
-        print(f"POST result: {r2.status_code} → {r2.url[:90]}")
+                # Fill username
+                page.wait_for_selector('input[name="username"]', timeout=15000)
+                page.fill('input[name="username"]', self.username)
+                print("Username entered")
 
-        if "Wrong email or password" in r2.text or "wrong-email-password" in r2.text:
-            print("ERROR: wrong username or password")
-            return False
+                # Click Continue / Next button
+                page.click('button[type="submit"]')
+                page.wait_for_load_state("networkidle", timeout=15000)
 
-        cookies = list(self.session.cookies.keys())
-        print(f"Cookies: {cookies}")
+                # Fill password (may be on same page or next page)
+                page.wait_for_selector('input[name="password"]', timeout=15000)
+                page.fill('input[name="password"]', self.password)
+                print("Password entered")
 
-        # If still on Auth0, try to follow any redirect back to CareLink
-        if CARELINK_EU_BASE not in r2.url:
-            print("Not yet on CareLink, probing dashboard...")
-            r3 = self.session.get(
-                f"{CARELINK_EU_BASE}/patient/connect/data",
-                params={"cpSerialNumber": "NONE", "msgType": "last24hours",
-                        "requestTime": int(time.time() * 1000)},
-                headers={"Accept": "application/json"},
-            )
-            print(f"Probe: {r3.status_code}")
-            if r3.status_code == 200:
-                print("Login OK (data accessible)")
-                return True
-            print(f"Probe body: {r3.text[:200]}")
-            return False
+                # Submit login
+                page.click('button[type="submit"]')
 
-        print("Login OK")
+                # Wait to land back on CareLink
+                page.wait_for_url(f"{CARELINK_EU_BASE}/**", timeout=30000)
+                print(f"Logged in, on: {page.url[:80]}")
+
+            except PlaywrightTimeout as e:
+                print(f"Timeout: {e}")
+                print(f"Current URL: {page.url[:80]}")
+                # Check for error message on page
+                try:
+                    err = page.query_selector('[class*="error"], [class*="alert"]')
+                    if err:
+                        print(f"Page error: {err.inner_text()}")
+                except Exception:
+                    pass
+                browser.close()
+                return False
+
+            # Transfer cookies to requests session
+            for cookie in context.cookies():
+                self.session.cookies.set(
+                    cookie["name"], cookie["value"],
+                    domain=cookie.get("domain", "").lstrip(".")
+                )
+            cookie_names = [c["name"] for c in context.cookies()]
+            print(f"Cookies transferred: {cookie_names}")
+            browser.close()
+
         return True
 
     def getRecentData(self):
