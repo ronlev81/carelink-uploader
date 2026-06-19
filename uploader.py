@@ -3,7 +3,7 @@ import time
 import hashlib
 import requests
 from datetime import datetime, timezone
-from urllib.parse import urlencode
+from urllib.parse import urlparse, parse_qs
 
 CARELINK_USERNAME = os.environ['CARELINK_USERNAME']
 CARELINK_PASSWORD = os.environ['CARELINK_PASSWORD']
@@ -23,86 +23,87 @@ TREND_MAP = {
 }
 
 session = requests.Session()
-session.headers.update({
-    'User-Agent': 'Mozilla/5.0',
-    'Accept': 'application/json, text/plain, */*',
-})
+session.headers.update({'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X)'})
 
 def login():
     print('Logging in to CareLink EU...')
-    # Step 1: get login page to obtain cookies
-    r = session.get(
+
+    # Step 1: get Auth0 login page
+    r1 = session.get(
         f'{CARELINK_BASE}/patient/sso/login',
         params={'country': CARELINK_COUNTRY, 'lang': 'en'},
         allow_redirects=True
     )
-    print(f'Login page: {r.status_code} {r.url}')
+    print(f'Login page: {r1.status_code} {r1.url}')
 
-    # Step 2: post credentials to the SSO form
-    login_data = {
+    # Extract state from Auth0 URL
+    parsed = urlparse(r1.url)
+    qs = parse_qs(parsed.query)
+    state = qs.get('state', [None])[0]
+    print(f'Auth0 state: {state[:20] if state else "None"}...')
+
+    # Step 2: POST credentials to Auth0
+    login_url = r1.url  # Auth0 login URL
+    form_data = {
         'username': CARELINK_USERNAME,
         'password': CARELINK_PASSWORD,
+        'action': 'default',
     }
-    r2 = session.post(r.url, data=login_data, allow_redirects=True)
-    print(f'Auth response: {r2.status_code}')
+    if state:
+        form_data['state'] = state
 
-    # Step 3: get auth token
-    r3 = session.get(
-        f'{CARELINK_BASE}/patient/sso/login',
-        params={'country': CARELINK_COUNTRY, 'lang': 'en'},
+    r2 = session.post(
+        login_url,
+        data=form_data,
+        headers={'Content-Type': 'application/x-www-form-urlencoded'},
         allow_redirects=True
     )
-    print(f'Token response: {r3.status_code}')
+    print(f'Auth POST: {r2.status_code} → {r2.url}')
 
-    # Check if we have an auth cookie
+    # Step 3: Follow redirect back to CareLink to get session cookie
+    if 'carelink' in r2.url or r2.status_code == 200:
+        r3 = session.get(f'{CARELINK_BASE}/patient/sso/login',
+                         params={'country': CARELINK_COUNTRY, 'lang': 'en'},
+                         allow_redirects=True)
+        print(f'Session: {r3.status_code}')
+
     cookies = dict(session.cookies)
     print(f'Cookies: {list(cookies.keys())}')
-    return r2.status_code in (200, 302) or len(cookies) > 0
+    return True
 
 def fetch_data():
     url = f'{CARELINK_BASE}/patient/connect/data'
-    params = {
-        'cpSerialNumber': 'NONE',
-        'msgType': 'last24hours',
-        'requestTime': int(time.time() * 1000)
-    }
+    params = {'cpSerialNumber': 'NONE', 'msgType': 'last24hours',
+              'requestTime': int(time.time() * 1000)}
     r = session.get(url, params=params)
     print(f'Data fetch: {r.status_code}')
     if r.status_code == 200:
         try:
             return r.json()
         except Exception:
-            print(f'Non-JSON response: {r.text[:200]}')
+            print(f'Response: {r.text[:300]}')
+    elif r.status_code == 401:
+        print('401 — session expired')
     return None
 
 def upload_glucose(glucose, trend_raw):
     trend = TREND_MAP.get(trend_raw, 'NONE')
-    entry = {
-        'type': 'sgv',
-        'sgv': glucose,
-        'date': int(time.time() * 1000),
-        'dateString': datetime.now(timezone.utc).isoformat(),
-        'direction': trend,
-        'device': 'Medtronic780G'
-    }
+    entry = {'type': 'sgv', 'sgv': glucose,
+             'date': int(time.time() * 1000),
+             'dateString': datetime.now(timezone.utc).isoformat(),
+             'direction': trend, 'device': 'Medtronic780G'}
     r = requests.post(f'{NS_HOST}/api/v1/entries', json=[entry], headers=NS_HEADERS)
-    print(f'NS glucose upload: {r.status_code} — {glucose} mg/dL {trend}')
+    print(f'NS: {r.status_code} — {glucose} mg/dL {trend}')
 
 def upload_pump(reservoir, battery):
-    status = {
-        'device': 'Medtronic780G',
-        'created_at': datetime.now(timezone.utc).isoformat(),
-        'pump': {
-            'reservoir': reservoir,
-            'battery': {'percent': battery},
-        }
-    }
+    status = {'device': 'Medtronic780G',
+               'created_at': datetime.now(timezone.utc).isoformat(),
+               'pump': {'reservoir': reservoir, 'battery': {'percent': battery}}}
     requests.post(f'{NS_HOST}/api/v1/devicestatus', json=[status], headers=NS_HEADERS)
 
 def main():
     print('Starting CareLink uploader...')
     login()
-
     while True:
         try:
             data = fetch_data()
@@ -111,15 +112,12 @@ def main():
                 glucose = sg.get('sg', 0)
                 if glucose:
                     upload_glucose(glucose, data.get('lastSGTrend', 'NONE'))
-                    upload_pump(
-                        data.get('reservoirRemainingUnits', 0),
-                        data.get('conduitBatteryLevel', 0)
-                    )
-                    print(f'OK: {glucose} mg/dL')
+                    upload_pump(data.get('reservoirRemainingUnits', 0),
+                                data.get('conduitBatteryLevel', 0))
                 else:
-                    print('No glucose value in response')
+                    print('No glucose in response')
             else:
-                print('No data — re-login...')
+                print('Re-logging...')
                 login()
         except Exception as e:
             print(f'Error: {e}')
@@ -127,7 +125,6 @@ def main():
                 login()
             except Exception:
                 pass
-
         time.sleep(INTERVAL)
 
 if __name__ == '__main__':
