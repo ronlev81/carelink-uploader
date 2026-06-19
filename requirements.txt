@@ -1,1 +1,2 @@
 requests==2.31.0
+carelink-python-client==0.2.5
