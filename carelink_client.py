@@ -95,22 +95,13 @@ class CareLinkClient:
 
             # Pump device metadata from top-level ResponsePayload
             rp = data.get("ResponsePayload", {})
-            print(f"ResponsePayload keys: {[k for k in rp.keys() if k not in ('mgdl','mmol')]}")
-            print(f"deviceDetails: {rp.get('deviceDetails')}")
+            dd = rp.get("deviceDetails", {})
             pump_info = {
-                "modelNumber":       rp.get("pumpModelNumber") or rp.get("modelNumber"),
-                "serialNumber":      rp.get("pumpSerialNumber") or rp.get("serialNumber"),
-                "deviceFamily":      rp.get("deviceFamily"),
-                "softwareVersion":   rp.get("pumpSoftwareNumber") or rp.get("softwareVersion"),
-                "conduitSerialNum":  rp.get("conduitSerialNumber"),
-                "conduitModel":      rp.get("conduitModelNumber"),
-                "reservoir":         rp.get("reservoirRemainingUnits"),
-                "batteryPercent":    rp.get("conduitBatteryLevel"),
+                "pumpModel":   dd.get("deviceModel"),
+                "sensorModel": dd.get("sensorModel"),
             }
-            # Drop None values to keep it clean
             pump_info = {k: v for k, v in pump_info.items() if v is not None}
-            if pump_info.get("modelNumber"):
-                print(f"Pump: {pump_info.get('modelNumber')} s/n {pump_info.get('serialNumber')}")
+            print(f"Pump: {pump_info.get('pumpModel')} sensor: {pump_info.get('sensorModel')}")
 
             result = {
                 "glucose":    latest_sg.get("sg")            if latest_sg else None,

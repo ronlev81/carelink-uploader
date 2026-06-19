@@ -44,13 +44,9 @@ def upload_devicestatus(data):
         'device': 'Medtronic780G',
         'created_at': datetime.now(timezone.utc).isoformat(),
         'pump': {
-            'autoMode':      stod.get('autoMode'),
-            'modelNumber':   pump_info.get('modelNumber'),
-            'serialNumber':  pump_info.get('serialNumber'),
-            'deviceFamily':  pump_info.get('deviceFamily'),
-            'softwareVersion': pump_info.get('softwareVersion'),
-            'reservoir':     pump_info.get('reservoir'),
-            'battery':       {'percent': pump_info.get('batteryPercent')} if pump_info.get('batteryPercent') is not None else None,
+            'autoMode':    stod.get('autoMode'),
+            'pumpModel':   pump_info.get('pumpModel'),
+            'sensorModel': pump_info.get('sensorModel'),
         },
         'cgmStats': {
             'today': {
