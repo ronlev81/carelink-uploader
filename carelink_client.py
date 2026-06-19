@@ -38,26 +38,38 @@ class CareLinkClient:
                 page.goto(url, wait_until="networkidle", timeout=30000)
                 print(f"Reached: {page.url[:80]}")
 
-                # Step 1: fill username and submit
+                # Fill username + password (both on same page for CareLink IL)
                 page.wait_for_selector('input[name="username"]', timeout=15000)
                 page.fill('input[name="username"]', self.username)
                 print("Username entered")
-                page.click('button[type="submit"]')
-                page.wait_for_load_state("networkidle", timeout=15000)
 
-                # Step 2: fill password page — also re-fill username if visible
                 page.wait_for_selector('input[name="password"]', timeout=15000)
-                # Re-fill username in case Auth0 shows it again on password page
-                for sel in ['input[name="username"]', 'input[name="email"]']:
-                    try:
-                        el = page.query_selector(sel)
-                        if el:
-                            page.fill(sel, self.username)
-                            print(f"Re-filled {sel} on password page")
-                    except Exception:
-                        pass
                 page.fill('input[name="password"]', self.password)
                 print("Password entered")
+
+                # Click CAPTCHA checkbox ("not a robot") if present
+                import time as _time
+                for captcha_sel in [
+                    'input[name="captcha"]',
+                    'input[type="checkbox"]',
+                    '[class*="captcha"] input',
+                    'iframe[title*="captcha"]',
+                    'iframe[title*="hCaptcha"]',
+                    'iframe[src*="hcaptcha"]',
+                ]:
+                    try:
+                        el = page.query_selector(captcha_sel)
+                        if el and el.is_visible():
+                            if "iframe" in captcha_sel:
+                                frame = page.frame_locator(captcha_sel)
+                                frame.locator(".checkbox").click(timeout=5000)
+                            else:
+                                el.click()
+                            print(f"Captcha clicked: {captcha_sel}")
+                            _time.sleep(2)
+                            break
+                    except Exception:
+                        pass
 
                 # Submit login
                 page.click('button[type="submit"]')
