@@ -38,17 +38,24 @@ class CareLinkClient:
                 page.goto(url, wait_until="networkidle", timeout=30000)
                 print(f"Reached: {page.url[:80]}")
 
-                # Fill username
+                # Step 1: fill username and submit
                 page.wait_for_selector('input[name="username"]', timeout=15000)
                 page.fill('input[name="username"]', self.username)
                 print("Username entered")
-
-                # Click Continue / Next button
                 page.click('button[type="submit"]')
                 page.wait_for_load_state("networkidle", timeout=15000)
 
-                # Fill password (may be on same page or next page)
+                # Step 2: fill password page — also re-fill username if visible
                 page.wait_for_selector('input[name="password"]', timeout=15000)
+                # Re-fill username in case Auth0 shows it again on password page
+                for sel in ['input[name="username"]', 'input[name="email"]']:
+                    try:
+                        el = page.query_selector(sel)
+                        if el:
+                            page.fill(sel, self.username)
+                            print(f"Re-filled {sel} on password page")
+                    except Exception:
+                        pass
                 page.fill('input[name="password"]', self.password)
                 print("Password entered")
 
