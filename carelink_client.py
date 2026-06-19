@@ -31,19 +31,42 @@ class CareLinkClient:
 
     # ------------------------------------------------------------------
     def _sso_init(self):
-        """Return (client_id, redirect_uri, auth_url) from SSO redirect."""
+        """Return (client_id, redirect_uri, state, auth_url) from SSO redirect."""
         r = self.session.get(
             f"{CARELINK_EU_BASE}/patient/sso/login",
             params={"country": self.country, "lang": "en"},
             allow_redirects=True,
         )
         print(f"SSO init: {r.status_code} → {r.url[:100]}")
-        parsed   = urlparse(r.url)
-        qs       = parse_qs(parsed.query)
-        client_id    = qs.get("client_id", [None])[0]
+        parsed = urlparse(r.url)
+        qs     = parse_qs(parsed.query)
+
+        # Try URL params first (older Auth0 /authorize redirect)
+        client_id    = qs.get("client_id",    [None])[0]
         redirect_uri = qs.get("redirect_uri", [None])[0]
-        state        = qs.get("state",    [None])[0]
+        state        = qs.get("state",        [None])[0]
+
+        # Auth0 "New Universal Login" hides client_id inside the page HTML
+        if not client_id:
+            for pattern in [
+                r'"clientID"\s*:\s*"([^"]+)"',
+                r'"client_id"\s*:\s*"([^"]+)"',
+                r'clientId["\s:=]+([A-Za-z0-9_\-]{10,})',
+            ]:
+                m = re.search(pattern, r.text)
+                if m:
+                    client_id = m.group(1)
+                    break
+
+        if not redirect_uri:
+            m = re.search(r'"redirectURI"\s*:\s*"([^"]+)"', r.text)
+            if m:
+                redirect_uri = m.group(1).replace("\\u002F", "/")
+
         print(f"  client_id={client_id}  state={state and state[:20]}")
+        if not client_id:
+            # Print first 1500 chars of HTML so we can find where client_id is
+            print("DEBUG HTML:", r.text[:1500])
         return client_id, redirect_uri, state, r.url
 
     # ------------------------------------------------------------------
