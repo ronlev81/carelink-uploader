@@ -54,10 +54,24 @@ class CareLinkClient:
 
                 # Submit login
                 page.click('button[type="submit"]')
+                print("Submit clicked, waiting for navigation...")
 
-                # Wait to land back on CareLink
-                page.wait_for_url(f"{CARELINK_EU_BASE}/**", timeout=30000)
-                print(f"Logged in, on: {page.url[:80]}")
+                # Wait for any navigation to complete (up to 60s)
+                try:
+                    page.wait_for_url(f"{CARELINK_EU_BASE}/**", timeout=60000)
+                    print(f"Landed on CareLink: {page.url[:80]}")
+                except PlaywrightTimeout:
+                    print(f"wait_for_url timeout, current URL: {page.url[:80]}")
+                    # Maybe we're on an intermediate page — wait for idle and check
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                    print(f"After idle wait: {page.url[:80]}")
+                    if CARELINK_EU_BASE not in page.url:
+                        # Print page text to see what's on screen
+                        try:
+                            body = page.inner_text("body")
+                            print(f"Page content: {body[:400]}")
+                        except Exception:
+                            pass
 
             except PlaywrightTimeout as e:
                 print(f"Timeout: {e}")
