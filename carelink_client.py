@@ -60,8 +60,9 @@ class CareLinkClient:
                     for day in agg:
                         sg_block = day.get("sg", {})
                         all_sg.extend(sg_block.get("sgVal", []))
-                    if all_sg:
-                        latest = max(all_sg, key=lambda x: x.get("ts", 0))
+                    valid = [x for x in all_sg if x.get("sg", 0) > 0]
+                    if valid:
+                        latest = max(valid, key=lambda x: x.get("ts", 0))
                         print(f"Latest: sg={latest.get('sg')} ts={latest.get('ts')}")
                         return latest
                 except (KeyError, TypeError):
