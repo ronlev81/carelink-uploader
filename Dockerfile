@@ -3,5 +3,5 @@ RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install -r requirements.txt
-COPY uploader.py .
+COPY uploader.py carelink_client.py .
 CMD ["python", "-u", "uploader.py"]
