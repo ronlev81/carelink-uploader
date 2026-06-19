@@ -3,8 +3,7 @@ import time
 import hashlib
 import requests
 from datetime import datetime, timezone
-
-from CaRelinkClient.CaRelinkClient import CareLinkClient
+from urllib.parse import urlencode
 
 CARELINK_USERNAME = os.environ['CARELINK_USERNAME']
 CARELINK_PASSWORD = os.environ['CARELINK_PASSWORD']
@@ -16,11 +15,65 @@ INTERVAL = int(os.environ.get('UPLOAD_INTERVAL', '300'))
 API_SECRET_HASH = hashlib.sha1(API_SECRET.encode()).hexdigest()
 NS_HEADERS = {'API-SECRET': API_SECRET_HASH, 'Content-Type': 'application/json'}
 
+CARELINK_BASE = 'https://carelink.minimed.eu'
 TREND_MAP = {
     'NONE': 'NONE', 'FLAT': 'Flat',
     'SLIGHTLY_UP': 'FortyFiveUp', 'UP': 'SingleUp', 'RAPIDLY_UP': 'DoubleUp',
     'SLIGHTLY_DOWN': 'FortyFiveDown', 'DOWN': 'SingleDown', 'RAPIDLY_DOWN': 'DoubleDown'
 }
+
+session = requests.Session()
+session.headers.update({
+    'User-Agent': 'Mozilla/5.0',
+    'Accept': 'application/json, text/plain, */*',
+})
+
+def login():
+    print('Logging in to CareLink EU...')
+    # Step 1: get login page to obtain cookies
+    r = session.get(
+        f'{CARELINK_BASE}/patient/sso/login',
+        params={'country': CARELINK_COUNTRY, 'lang': 'en'},
+        allow_redirects=True
+    )
+    print(f'Login page: {r.status_code} {r.url}')
+
+    # Step 2: post credentials to the SSO form
+    login_data = {
+        'username': CARELINK_USERNAME,
+        'password': CARELINK_PASSWORD,
+    }
+    r2 = session.post(r.url, data=login_data, allow_redirects=True)
+    print(f'Auth response: {r2.status_code}')
+
+    # Step 3: get auth token
+    r3 = session.get(
+        f'{CARELINK_BASE}/patient/sso/login',
+        params={'country': CARELINK_COUNTRY, 'lang': 'en'},
+        allow_redirects=True
+    )
+    print(f'Token response: {r3.status_code}')
+
+    # Check if we have an auth cookie
+    cookies = dict(session.cookies)
+    print(f'Cookies: {list(cookies.keys())}')
+    return r2.status_code in (200, 302) or len(cookies) > 0
+
+def fetch_data():
+    url = f'{CARELINK_BASE}/patient/connect/data'
+    params = {
+        'cpSerialNumber': 'NONE',
+        'msgType': 'last24hours',
+        'requestTime': int(time.time() * 1000)
+    }
+    r = session.get(url, params=params)
+    print(f'Data fetch: {r.status_code}')
+    if r.status_code == 200:
+        try:
+            return r.json()
+        except Exception:
+            print(f'Non-JSON response: {r.text[:200]}')
+    return None
 
 def upload_glucose(glucose, trend_raw):
     trend = TREND_MAP.get(trend_raw, 'NONE')
@@ -33,7 +86,7 @@ def upload_glucose(glucose, trend_raw):
         'device': 'Medtronic780G'
     }
     r = requests.post(f'{NS_HOST}/api/v1/entries', json=[entry], headers=NS_HEADERS)
-    print(f'Glucose {glucose} mg/dL ({trend}) → NS: {r.status_code}')
+    print(f'NS glucose upload: {r.status_code} — {glucose} mg/dL {trend}')
 
 def upload_pump(reservoir, battery):
     status = {
@@ -48,33 +101,32 @@ def upload_pump(reservoir, battery):
 
 def main():
     print('Starting CareLink uploader...')
-    client = CareLinkClient(CARELINK_USERNAME, CARELINK_PASSWORD, CARELINK_COUNTRY)
-
-    if not client.login():
-        print('Login failed — check credentials')
-        return
-
-    print('Login successful')
+    login()
 
     while True:
         try:
-            data = client.getRecentData()
+            data = fetch_data()
             if data:
                 sg = data.get('lastSG', {})
                 glucose = sg.get('sg', 0)
                 if glucose:
-                    trend = data.get('lastSGTrend', 'NONE')
-                    upload_glucose(glucose, trend)
+                    upload_glucose(glucose, data.get('lastSGTrend', 'NONE'))
                     upload_pump(
                         data.get('reservoirRemainingUnits', 0),
                         data.get('conduitBatteryLevel', 0)
                     )
+                    print(f'OK: {glucose} mg/dL')
                 else:
-                    print('No glucose reading available')
+                    print('No glucose value in response')
             else:
-                print('No data returned')
+                print('No data — re-login...')
+                login()
         except Exception as e:
             print(f'Error: {e}')
+            try:
+                login()
+            except Exception:
+                pass
 
         time.sleep(INTERVAL)
 
