@@ -65,8 +65,22 @@ class CareLinkClient:
 
         print(f"  client_id={client_id}  state={state and state[:20]}")
         if not client_id:
-            # Print first 1500 chars of HTML so we can find where client_id is
-            print("DEBUG HTML:", r.text[:1500])
+            # Search full HTML for any occurrence of clientID / client_id
+            for pat in [r'"clientID"', r'"client_id"', r'clientId', r'"CLIENT_ID"']:
+                idx = r.text.find(pat.strip('"'))
+                if idx >= 0:
+                    print(f"DEBUG found '{pat}' at index {idx}:")
+                    print(r.text[max(0,idx-50):idx+200])
+                    break
+            else:
+                print("DEBUG: no clientID found in HTML at all")
+                print("DEBUG FULL HTML LENGTH:", len(r.text))
+                # Print a chunk around the word "auth" to find config block
+                idx = r.text.lower().find('"auth0"')
+                if idx < 0:
+                    idx = r.text.lower().find('auth0config')
+                if idx >= 0:
+                    print(r.text[max(0,idx-100):idx+400])
         return client_id, redirect_uri, state, r.url
 
     # ------------------------------------------------------------------
