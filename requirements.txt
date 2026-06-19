@@ -1,2 +1,1 @@
 requests==2.31.0
-git+https://github.com/benceszasz/carelink-python-client.git
