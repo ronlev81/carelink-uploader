@@ -3,6 +3,7 @@ import time
 import hashlib
 import requests
 from datetime import datetime, timezone
+from carelink_client import CareLinkClient
 
 NS_HOST     = os.environ['NS_HOST'].rstrip('/')
 API_SECRET  = os.environ['API_SECRET']
@@ -36,7 +37,6 @@ def upload_pump(reservoir, battery):
     requests.post(f'{NS_HOST}/api/v1/devicestatus', json=[status], headers=NS_HEADERS)
 
 def main():
-    from carelink_client import CareLinkClient
     print('Starting CareLink uploader...')
     client = CareLinkClient(USERNAME, PASSWORD, COUNTRY)
     print(f'Logging in as {USERNAME}...')
