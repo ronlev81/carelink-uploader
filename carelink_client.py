@@ -58,7 +58,8 @@ class CareLinkClient:
                     agg = data["ResponsePayload"]["mgdl"]["Agg1d"]
                     all_sg = []
                     for day in agg:
-                        all_sg.extend(day.get("sgVal", []))
+                        sg_block = day.get("sg", {})
+                        all_sg.extend(sg_block.get("sgVal", []))
                     if all_sg:
                         latest = max(all_sg, key=lambda x: x.get("ts", 0))
                         print(f"Latest: sg={latest.get('sg')} ts={latest.get('ts')}")
