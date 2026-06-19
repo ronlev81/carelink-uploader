@@ -47,27 +47,21 @@ class CareLinkClient:
                 page.fill('input[name="password"]', self.password)
                 print("Password entered")
 
-                # Click CAPTCHA checkbox ("not a robot") if present
-                import time as _time
-                for captcha_sel in [
-                    'input[name="captcha"]',
-                    'input[type="checkbox"]',
-                    '[class*="captcha"] input',
-                    'iframe[title*="captcha"]',
-                    'iframe[title*="hCaptcha"]',
-                    'iframe[src*="hcaptcha"]',
-                ]:
+                # Debug: print all inputs and iframes on the page
+                inputs = page.query_selector_all("input")
+                for inp in inputs:
                     try:
-                        el = page.query_selector(captcha_sel)
-                        if el and el.is_visible():
-                            if "iframe" in captcha_sel:
-                                frame = page.frame_locator(captcha_sel)
-                                frame.locator(".checkbox").click(timeout=5000)
-                            else:
-                                el.click()
-                            print(f"Captcha clicked: {captcha_sel}")
-                            _time.sleep(2)
-                            break
+                        print(f"INPUT: type={inp.get_attribute('type')} "
+                              f"name={inp.get_attribute('name')} "
+                              f"id={inp.get_attribute('id')} "
+                              f"class={inp.get_attribute('class')}")
+                    except Exception:
+                        pass
+                iframes = page.query_selector_all("iframe")
+                for fr in iframes:
+                    try:
+                        print(f"IFRAME: src={fr.get_attribute('src')[:80] if fr.get_attribute('src') else ''} "
+                              f"title={fr.get_attribute('title')}")
                     except Exception:
                         pass
 
