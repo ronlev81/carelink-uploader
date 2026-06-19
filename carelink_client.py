@@ -1,13 +1,19 @@
 """
-CareLink EU client — goes through carelink.minimed.eu/patient/sso/login
-which redirects to Auth0, then submits credentials to the form action URL.
+CareLink EU client.
+Auth strategy:
+  1. GET /patient/sso/login → follows to Auth0 /authorize URL → extract client_id + state
+  2. POST /co/authenticate (Auth0 cross-origin endpoint) → login_ticket
+  3. GET /authorize?login_ticket=... → redirects to CareLink callback → session cookie
+  4. GET /patient/connect/data with session cookie
 """
 import re
 import time
+import json
 import requests
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlencode
 
 CARELINK_EU_BASE = "https://carelink.minimed.eu"
+AUTH0_DOMAIN     = "carelink-login.minimed.eu"
 
 
 class CareLinkClient:
@@ -18,96 +24,110 @@ class CareLinkClient:
         self.session  = requests.Session()
         self.session.headers.update({
             "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148"
             ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
         })
 
-    def _parse_form(self, html, base_url):
-        """Return (action_url, hidden_fields) from the first <form> in html."""
-        form_match = re.search(r'<form[^>]*action=["\']([^"\']+)["\'][^>]*>(.*?)</form>',
-                               html, re.DOTALL | re.IGNORECASE)
-        action = base_url
-        fields = {}
-        if form_match:
-            action = form_match.group(1)
-            if action.startswith('/'):
-                parsed = urlparse(base_url)
-                action = f"{parsed.scheme}://{parsed.netloc}{action}"
-            for m in re.finditer(r'<input[^>]+>', form_match.group(2), re.IGNORECASE):
-                tag = m.group(0)
-                itype = re.search(r'type=["\']([^"\']+)["\']', tag)
-                name  = re.search(r'name=["\']([^"\']+)["\']', tag)
-                value = re.search(r'value=["\']([^"\']*)["\']', tag)
-                if name and (not itype or itype.group(1).lower() != 'submit'):
-                    fields[name.group(1)] = value.group(1) if value else ''
-        return action, fields
-
-    def login(self) -> bool:
-        print("Step 1: CareLink SSO → Auth0")
-        r1 = self.session.get(
+    # ------------------------------------------------------------------
+    def _sso_init(self):
+        """Return (client_id, redirect_uri, auth_url) from SSO redirect."""
+        r = self.session.get(
             f"{CARELINK_EU_BASE}/patient/sso/login",
             params={"country": self.country, "lang": "en"},
             allow_redirects=True,
         )
-        print(f"  {r1.status_code} → {r1.url[:90]}")
-        if r1.status_code != 200:
-            return False
+        print(f"SSO init: {r.status_code} → {r.url[:100]}")
+        parsed   = urlparse(r.url)
+        qs       = parse_qs(parsed.query)
+        client_id    = qs.get("client_id", [None])[0]
+        redirect_uri = qs.get("redirect_uri", [None])[0]
+        state        = qs.get("state",    [None])[0]
+        print(f"  client_id={client_id}  state={state and state[:20]}")
+        return client_id, redirect_uri, state, r.url
 
-        print("Step 2: parse Auth0 form")
-        action, fields = self._parse_form(r1.text, r1.url)
-        print(f"  action: {action[:80]}")
-        print(f"  fields: {list(fields.keys())}")
-
-        # Fill credentials — Auth0 Universal Login field names
-        for key in ("username", "email", "login"):
-            if key in fields or not fields:
-                fields["username"] = self.username
-                break
-        fields["username"] = self.username
-        fields["password"] = self.password
-        # Remove captcha — empty value causes 400; omit entirely
-        fields.pop("captcha", None)
-        if "action" not in fields:
-            fields["action"] = "default"
-
-        print("Step 3: POST credentials")
-        r2 = self.session.post(
-            action,
-            data=fields,
+    # ------------------------------------------------------------------
+    def _co_authenticate(self, client_id):
+        """Auth0 cross-origin authenticate — returns login_ticket."""
+        payload = {
+            "client_id":       client_id,
+            "username":        self.username,
+            "password":        self.password,
+            "credential_type": "http://auth0.com/oauth/grant-type/password-realm",
+            "realm":           "Username-Password-Authentication",
+        }
+        r = self.session.post(
+            f"https://{AUTH0_DOMAIN}/co/authenticate",
+            json=payload,
             headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Referer": r1.url,
-                "Origin": f"https://{urlparse(r1.url).netloc}",
+                "Content-Type": "application/json",
+                "Origin":       f"https://{AUTH0_DOMAIN}",
             },
+        )
+        print(f"co/authenticate: {r.status_code}")
+        if r.status_code == 200:
+            data = r.json()
+            ticket = data.get("login_ticket")
+            print(f"  login_ticket={'OK' if ticket else 'MISSING'}")
+            return ticket
+        print(f"  body: {r.text[:300]}")
+        return None
+
+    # ------------------------------------------------------------------
+    def _exchange_ticket(self, client_id, redirect_uri, login_ticket):
+        """GET /authorize with login_ticket → follow back to CareLink."""
+        params = {
+            "client_id":     client_id,
+            "response_type": "code",
+            "redirect_uri":  redirect_uri,
+            "scope":         "openid email profile",
+            "login_ticket":  login_ticket,
+            "prompt":        "none",
+        }
+        r = self.session.get(
+            f"https://{AUTH0_DOMAIN}/authorize",
+            params=params,
             allow_redirects=True,
         )
-        print(f"  {r2.status_code} → {r2.url[:90]}")
+        print(f"ticket exchange: {r.status_code} → {r.url[:100]}")
+        return r
 
-        if "Wrong email or password" in r2.text:
-            print("  ERROR: wrong credentials")
+    # ------------------------------------------------------------------
+    def login(self) -> bool:
+        client_id, redirect_uri, state, auth_url = self._sso_init()
+        if not client_id:
+            print("Could not extract client_id from SSO redirect")
             return False
 
-        # Step 4: follow back to CareLink to get session cookie
-        if CARELINK_EU_BASE not in r2.url:
-            r3 = self.session.get(
-                f"{CARELINK_EU_BASE}/patient/sso/login",
-                params={"country": self.country, "lang": "en"},
-                allow_redirects=True,
-            )
-            print(f"Step 4 session: {r3.status_code}")
+        ticket = self._co_authenticate(client_id)
+        if not ticket:
+            print("co/authenticate failed")
+            return False
+
+        r = self._exchange_ticket(client_id, redirect_uri, ticket)
 
         cookies = list(self.session.cookies.keys())
-        print(f"  cookies: {cookies}")
-        # Success if we have a session/access cookie from carelink
-        return any("carelink" in c.lower() or "access" in c.lower()
-                   or "session" in c.lower() or "jwt" in c.lower()
-                   for c in cookies) or len(cookies) > 2
+        print(f"cookies after exchange: {cookies}")
 
+        # Check we landed back on CareLink with a real session
+        if CARELINK_EU_BASE in r.url or any(
+            k.lower() in ("auth", "session", "jwt", "access_token", "carelink")
+            for k in cookies
+        ):
+            print("Login OK")
+            return True
+
+        # Fallback: try to retrieve a known protected page to confirm
+        test = self.session.get(f"{CARELINK_EU_BASE}/patient/dashboard", allow_redirects=False)
+        print(f"Dashboard probe: {test.status_code}")
+        if test.status_code in (200, 302) and CARELINK_EU_BASE in (test.headers.get("Location", "")):
+            print("Login OK (redirect to dashboard)")
+            return True
+
+        print("Login FAILED — no CareLink session cookie")
+        return False
+
+    # ------------------------------------------------------------------
     def getRecentData(self):
         params = {
             "cpSerialNumber": "NONE",
@@ -117,6 +137,7 @@ class CareLinkClient:
         r = self.session.get(
             f"{CARELINK_EU_BASE}/patient/connect/data",
             params=params,
+            headers={"Accept": "application/json"},
         )
         print(f"Data fetch: {r.status_code}")
         if r.status_code == 200:
@@ -124,4 +145,6 @@ class CareLinkClient:
                 return r.json()
             except Exception:
                 print(f"Non-JSON: {r.text[:300]}")
+        else:
+            print(f"  body: {r.text[:200]}")
         return None
