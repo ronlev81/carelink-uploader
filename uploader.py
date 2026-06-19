@@ -39,22 +39,17 @@ def upload_pump(reservoir, battery):
     requests.post(f'{NS_HOST}/api/v1/devicestatus', json=[status], headers=NS_HEADERS)
 
 def extract_data(data):
-    """Extract glucose + pump info from /patient/data/sharing/display response."""
+    """Extract glucose from clcloud personalWebView response.
+    Returns (glucose, trend, reservoir, battery)
+    personalWebView returns the latest reading: {"sg": <int>, "ts": <unix>}
+    """
     if not data:
         return None, None, None, None
 
-    # Try common field names from CareLink display API
-    sg        = data.get('lastSG') or data.get('sg') or {}
-    glucose   = sg.get('sg') or sg.get('value') or data.get('sgv')
-    trend     = data.get('lastSGTrend') or data.get('trend') or 'NONE'
-    reservoir = data.get('reservoirRemainingUnits') or data.get('reservoir') or 0
-    battery   = (data.get('conduitBatteryLevel') or
-                 data.get('pumpBatteryLevelPercent') or 0)
-
-    # Display API might nest under different keys — print structure once
-    if not glucose:
-        import json
-        print(f"Full data: {json.dumps(data, indent=2)[:2000]}")
+    glucose   = data.get('sg')
+    trend     = data.get('trend') or 'NONE'
+    reservoir = data.get('reservoirRemainingUnits') or 0
+    battery   = data.get('conduitBatteryLevel') or 0
 
     return glucose, trend, reservoir, battery
 
