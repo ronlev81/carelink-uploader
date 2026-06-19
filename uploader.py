@@ -53,8 +53,8 @@ def extract_data(data):
 
     # Display API might nest under different keys — print structure once
     if not glucose:
-        keys = list(data.keys())[:15]
-        print(f"Data keys: {keys}")
+        import json
+        print(f"Full data: {json.dumps(data, indent=2)[:2000]}")
 
     return glucose, trend, reservoir, battery
 
