@@ -195,6 +195,7 @@ class CareLinkClient:
 
             result = {
                 "glucose":    latest_sg.get("sg")            if latest_sg else None,
+                "rawAgg1d":   agg1d,
                 "ts":         latest_sg.get("ts")            if latest_sg else None,
                 "trend":      latest_sg.get("trend", "NONE") if latest_sg else "NONE",
                 "pumpInfo":   pump_info,

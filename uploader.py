@@ -50,6 +50,30 @@ def _init_firestore():
         print(f'Firestore init error: {e}')
 
 
+def _write_glucose_history(agg1d: list):
+    """Write sgVal readings to patients/{id}/glucoseByDay/{YYYY-MM-DD}."""
+    if not _fs or not agg1d:
+        return
+    try:
+        col = _fs.collection('patients').document(PATIENT_ID).collection('glucoseByDay')
+        for day in agg1d:
+            readings = [
+                {'ts': r['ts'] * 1000, 'sgv': r['sg']}
+                for r in day.get('sg', {}).get('sgVal', [])
+                if r.get('sg', 0) > 0
+            ]
+            if not readings:
+                continue
+            # Use the date of the first reading as doc ID
+            date_str = datetime.fromtimestamp(
+                readings[0]['ts'] / 1000, tz=timezone.utc
+            ).strftime('%Y-%m-%d')
+            col.document(date_str).set({'readings': readings, 'updatedAt': datetime.now(timezone.utc).isoformat()})
+        print(f'Firestore: glucose history written ({len(agg1d)} days)')
+    except Exception as e:
+        print(f'Firestore history error: {e}')
+
+
 def write_to_firestore(data):
     if not _fs:
         return
@@ -88,6 +112,8 @@ def write_to_firestore(data):
             'updatedAt':   now,
         })
 
+        # Write individual readings grouped by day
+        _write_glucose_history(data.get('rawAgg1d', []))
         print(f'Firestore: written — sg={data["glucose"]} TIR7d={s7.get("tirNormal")}%')
     except Exception as e:
         print(f'Firestore write error: {e}')
