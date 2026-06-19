@@ -19,6 +19,7 @@ TREND_MAP = {
     'RAPIDLY_DOWN': 'DoubleDown',
 }
 
+
 def upload_glucose(glucose, trend_raw):
     trend = TREND_MAP.get(trend_raw, 'NONE')
     entry = {
@@ -30,28 +31,64 @@ def upload_glucose(glucose, trend_raw):
     r = requests.post(f'{NS_HOST}/api/v1/entries', json=[entry], headers=NS_HEADERS)
     print(f'NS glucose: {r.status_code} — {glucose} mg/dL {trend}')
 
-def upload_pump(reservoir, battery):
+
+def upload_devicestatus(data):
+    """Upload pump status + TIR/avg/TDD stats to Nightscout devicestatus."""
+    s7   = data.get('stats7d',  {})
+    s14  = data.get('stats14d', {})
+    s30  = data.get('stats30d', {})
+    stod = data.get('statsToday', {})
+
+    pump_info = data.get('pumpInfo', {})
     status = {
         'device': 'Medtronic780G',
         'created_at': datetime.now(timezone.utc).isoformat(),
-        'pump': {'reservoir': reservoir, 'battery': {'percent': battery}},
+        'pump': {
+            'autoMode':      stod.get('autoMode'),
+            'modelNumber':   pump_info.get('modelNumber'),
+            'serialNumber':  pump_info.get('serialNumber'),
+            'deviceFamily':  pump_info.get('deviceFamily'),
+            'softwareVersion': pump_info.get('softwareVersion'),
+            'reservoir':     pump_info.get('reservoir'),
+            'battery':       {'percent': pump_info.get('batteryPercent')} if pump_info.get('batteryPercent') is not None else None,
+        },
+        'cgmStats': {
+            'today': {
+                'tirNormal':  stod.get('tirNormal'),
+                'tirHigh':    stod.get('tirHigh'),
+                'tirExtHigh': stod.get('tirExtHigh'),
+                'tirLow':     stod.get('tirLow'),
+                'avgSG':      stod.get('avgSG'),
+            },
+            '7d': {
+                'tirNormal':  s7.get('tirNormal'),
+                'tirHigh':    s7.get('tirHigh'),
+                'tirExtHigh': s7.get('tirExtHigh'),
+                'tirLow':     s7.get('tirLow'),
+                'avgSG':      s7.get('avgSG'),
+                'tdd':        s7.get('tdd'),
+                'autoMode':   s7.get('autoMode'),
+            },
+            '14d': {
+                'tirNormal':  s14.get('tirNormal'),
+                'tirHigh':    s14.get('tirHigh'),
+                'tirExtHigh': s14.get('tirExtHigh'),
+                'avgSG':      s14.get('avgSG'),
+                'tdd':        s14.get('tdd'),
+            },
+            '30d': {
+                'tirNormal':  s30.get('tirNormal'),
+                'tirHigh':    s30.get('tirHigh'),
+                'tirExtHigh': s30.get('tirExtHigh'),
+                'avgSG':      s30.get('avgSG'),
+                'tdd':        s30.get('tdd'),
+            },
+        },
     }
-    requests.post(f'{NS_HOST}/api/v1/devicestatus', json=[status], headers=NS_HEADERS)
 
-def extract_data(data):
-    """Extract glucose from clcloud personalWebView response.
-    Returns (glucose, trend, reservoir, battery)
-    personalWebView returns the latest reading: {"sg": <int>, "ts": <unix>}
-    """
-    if not data:
-        return None, None, None, None
+    r = requests.post(f'{NS_HOST}/api/v1/devicestatus', json=[status], headers=NS_HEADERS)
+    print(f'NS devicestatus: {r.status_code} — TIR7d={s7.get("tirNormal")}% avg7d={s7.get("avgSG")} TDD7d={s7.get("tdd")}u')
 
-    glucose   = data.get('sg')
-    trend     = data.get('trend') or 'NONE'
-    reservoir = data.get('reservoirRemainingUnits') or 0
-    battery   = data.get('conduitBatteryLevel') or 0
-
-    return glucose, trend, reservoir, battery
 
 def main():
     print('Starting CareLink uploader...')
@@ -64,15 +101,15 @@ def main():
     while True:
         try:
             data = client.getRecentData()
-            glucose, trend, reservoir, battery = extract_data(data)
-            if glucose:
-                upload_glucose(glucose, trend)
-                upload_pump(reservoir, battery)
+            if data and data.get('glucose'):
+                upload_glucose(data['glucose'], data.get('trend', 'NONE'))
+                upload_devicestatus(data)
             else:
                 print('No glucose reading')
         except Exception as e:
             print(f'Error: {e}')
         time.sleep(INTERVAL)
+
 
 if __name__ == '__main__':
     main()
