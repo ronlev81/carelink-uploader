@@ -96,6 +96,7 @@ class CareLinkClient:
             # Pump device metadata from top-level ResponsePayload
             rp = data.get("ResponsePayload", {})
             print(f"ResponsePayload keys: {[k for k in rp.keys() if k not in ('mgdl','mmol')]}")
+            print(f"deviceDetails: {rp.get('deviceDetails')}")
             pump_info = {
                 "modelNumber":       rp.get("pumpModelNumber") or rp.get("modelNumber"),
                 "serialNumber":      rp.get("pumpSerialNumber") or rp.get("serialNumber"),
