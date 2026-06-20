@@ -1,0 +1,22 @@
+# Local Python virtualenv (used only for local login / cookie seeding)
+.venv/
+
+# Secrets — NEVER commit (live CareLink session / credentials)
+secrets.local
+web_state.json
+cookie_jar.txt
+.chrome-login/
+.chrome-profile/
+logindata.json
+
+# Local-only helper/exploration scripts (not needed on Railway)
+web_session.py
+find_refresh.py
+test_login.py
+explore_login.py
+debug_login.py
+local_login.py
+
+# Python
+__pycache__/
+*.pyc

@@ -50,6 +50,52 @@ def _init_firestore():
         print(f'Firestore init error: {e}')
 
 
+# --- CareLink cookie jar persistence (Firestore is the source of truth) ---
+
+def _save_cookies(cookies):
+    """Persist the (rolling) CareLink cookie jar after each reauth."""
+    if not _fs:
+        return
+    try:
+        (_fs.collection('patients').document(PATIENT_ID)
+            .collection('secrets').document('carelinkSession')
+            .set({'cookies': cookies, 'updatedAt': datetime.now(timezone.utc).isoformat()}))
+        print(f'Firestore: saved {len(cookies)} CareLink cookies')
+    except Exception as e:
+        print(f'Firestore cookie save error: {e}')
+
+
+def _load_cookies():
+    """Load cookies from Firestore (latest refreshed jar); fall back to COOKIE_JAR env for first seed.
+
+    Set RESEED=1 to force-use COOKIE_JAR env (overwrites the stored jar) — used when the
+    Auth0 session finally expires and you've captured a fresh login.
+    """
+    reseed = os.environ.get('RESEED') == '1'
+    if not reseed and _fs:
+        try:
+            doc = (_fs.collection('patients').document(PATIENT_ID)
+                      .collection('secrets').document('carelinkSession').get())
+            if doc.exists:
+                cookies = (doc.to_dict() or {}).get('cookies')
+                if cookies:
+                    print(f'Loaded {len(cookies)} CareLink cookies from Firestore')
+                    return cookies
+        except Exception as e:
+            print(f'Firestore cookie load error: {e}')
+
+    env = os.environ.get('COOKIE_JAR')
+    if env:
+        try:
+            cookies = json.loads(env)
+            print(f'Loaded {len(cookies)} CareLink cookies from COOKIE_JAR env (initial seed)')
+            _save_cookies(cookies)  # promote into Firestore for next boot
+            return cookies
+        except Exception as e:
+            print(f'COOKIE_JAR parse error: {e}')
+    return None
+
+
 def _write_glucose_history(agg1d: list):
     """Write sgVal readings to patients/{id}/glucoseByDay/{YYYY-MM-DD}."""
     if not _fs or not agg1d:
@@ -162,11 +208,15 @@ def upload_devicestatus(data):
 def main():
     print('Starting CareLink uploader...')
     _init_firestore()
-    client = CareLinkClient()
-    if not client.login():
-        print('Login failed')
+
+    cookies = _load_cookies()
+    if not cookies:
+        print('No CareLink cookies found. Seed them once: run the local login + push '
+              'to Firestore (patients/<id>/secrets/carelinkSession) or set COOKIE_JAR env.')
         return
-    print('Ready')
+
+    client = CareLinkClient(cookies=cookies, on_cookies_updated=_save_cookies)
+    print('Ready (web reauth mode — no browser needed)')
 
     while True:
         try:
