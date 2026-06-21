@@ -12,6 +12,7 @@ logindata.json
 # Local-only helper/exploration scripts (not needed on Railway)
 web_session.py
 find_refresh.py
+find_endpoints.py
 test_login.py
 explore_login.py
 debug_login.py

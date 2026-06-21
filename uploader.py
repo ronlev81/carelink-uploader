@@ -135,16 +135,20 @@ def write_to_firestore(data):
 
         meta = _fs.collection('patients').document(PATIENT_ID).collection('meta')
 
+        patient_name = data.get('patientName')
+
         meta.document('latestVitals').set({
-            'glucose':   data['glucose'],
-            'trend':     trend,
-            'updatedAt': now,
+            'glucose':     data['glucose'],
+            'trend':       trend,
+            'patientName': patient_name,
+            'updatedAt':   now,
         }, merge=True)
 
         meta.document('latestPump').set({
             'pumpModel':   pi.get('pumpModel'),
             'sensorModel': pi.get('sensorModel'),
             'autoMode':    stod.get('autoMode'),
+            'patientName': patient_name,
             'updatedAt':   now,
         }, merge=True)
 

@@ -22,6 +22,7 @@ CARELINK_BASE = "https://carelink.minimed.eu"
 CLCLOUD_BASE  = "https://clcloud.minimed.eu"
 REAUTH_URL    = f"{CARELINK_BASE}/patient/sso/reauth"
 DATA_URL      = f"{CLCLOUD_BASE}/connect/retina/v1/personalWebView"
+USERS_ME_URL  = f"{CARELINK_BASE}/patient/users/me"
 
 # Refresh the token when it has less than this many seconds of life left.
 REFRESH_MARGIN_SEC = 8 * 60
@@ -59,6 +60,7 @@ class CareLinkClient:
         })
         self.on_cookies_updated = on_cookies_updated
         self.token = None
+        self._patient_name = None  # cached from /users/me
         if cookies:
             self.load_cookies(cookies)
 
@@ -144,9 +146,9 @@ class CareLinkClient:
 
     def getRecentData(self):
         """Returns dict with glucose, trend, ts, pumpInfo, stats*, rawAgg1d. None on failure."""
-        if self._needs_reauth():
-            if not self.reauth():
-                return None
+        # Proactively reauth every cycle to keep the Auth0 session warm — it appears to
+        # idle-expire, so we never let it go stale (reauth is cheap and rolls the session).
+        self.reauth()
 
         r = self._fetch()
         if r is not None and r.status_code == 401:
@@ -162,10 +164,32 @@ class CareLinkClient:
             return None
 
         try:
-            return self._parse(r.json())
+            result = self._parse(r.json())
         except (KeyError, TypeError, ValueError) as e:
             print(f"parse error: {e} — {r.text[:200]}")
             return None
+
+        if result is not None:
+            result["patientName"] = self._fetch_user()
+        return result
+
+    def _fetch_user(self):
+        """Patient display name (First Last) from /patient/users/me, cached."""
+        if self._patient_name is not None:
+            return self._patient_name or None
+        try:
+            r = self.session.get(USERS_ME_URL,
+                                 headers={"Authorization": f"Bearer {self.token}"}, timeout=20)
+            if r.status_code == 200:
+                me = r.json()
+                fn = (me.get("firstName") or "").strip()
+                ln = (me.get("lastName") or "").strip()
+                self._patient_name = (fn + " " + ln).strip()
+                print(f"patient: {self._patient_name or '(none)'}")
+        except Exception as e:
+            print(f"user fetch error: {e}")
+            self._patient_name = ""  # cache the failure to avoid refetching every cycle
+        return self._patient_name or None
 
     def _fetch(self):
         try:
