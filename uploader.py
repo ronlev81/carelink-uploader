@@ -1,31 +1,17 @@
 import os
 import json
 import time
-import hashlib
-import requests
 from datetime import datetime, timezone
 from carelink_client import CareLinkClient
 
-NS_HOST    = os.environ['NS_HOST'].rstrip('/')
-API_SECRET = os.environ['API_SECRET']
 INTERVAL   = int(os.environ.get('UPLOAD_INTERVAL', '300'))
 PATIENT_ID = os.environ.get('PATIENT_ID', 'patient_001')
 
-API_SECRET_HASH = hashlib.sha1(API_SECRET.encode()).hexdigest()
-NS_HEADERS = {'API-SECRET': API_SECRET_HASH, 'Content-Type': 'application/json'}
-
+# CareLink trend code -> VoiceCare GlucoseTrend value (used for Firestore)
 TREND_MAP = {
-    'NONE': 'NONE', 'FLAT': 'Flat', 'SLIGHTLY_UP': 'FortyFiveUp',
-    'UP': 'SingleUp', 'RAPIDLY_UP': 'DoubleUp',
-    'SLIGHTLY_DOWN': 'FortyFiveDown', 'DOWN': 'SingleDown',
-    'RAPIDLY_DOWN': 'DoubleDown',
-}
-
-# Nightscout → Firestore trend values (match VoiceCare GlucoseTrend type)
-NS_TO_TREND = {
-    'DoubleUp': 'risingFast', 'SingleUp': 'rising', 'FortyFiveUp': 'rising',
-    'Flat': 'stable', 'NONE': 'stable',
-    'FortyFiveDown': 'falling', 'SingleDown': 'falling', 'DoubleDown': 'fallingFast',
+    'NONE': 'stable', 'FLAT': 'stable',
+    'SLIGHTLY_UP': 'rising', 'UP': 'rising', 'RAPIDLY_UP': 'risingFast',
+    'SLIGHTLY_DOWN': 'falling', 'DOWN': 'falling', 'RAPIDLY_DOWN': 'fallingFast',
 }
 
 # --- Firestore setup (optional — skipped if FIREBASE_SERVICE_ACCOUNT not set) ---
@@ -129,8 +115,7 @@ def write_to_firestore(data):
         s30  = data.get('stats30d',   {})
         stod = data.get('statsToday', {})
         pi   = data.get('pumpInfo',   {})
-        ns_trend = TREND_MAP.get(data.get('trend', 'NONE'), 'NONE')
-        trend    = NS_TO_TREND.get(ns_trend, 'stable')
+        trend = TREND_MAP.get(data.get('trend', 'NONE'), 'stable')
         now = datetime.now(timezone.utc).isoformat()
 
         meta = _fs.collection('patients').document(PATIENT_ID).collection('meta')
@@ -169,46 +154,6 @@ def write_to_firestore(data):
         print(f'Firestore write error: {e}')
 
 
-# --- Nightscout ---
-
-def upload_glucose(glucose, trend_raw):
-    trend = TREND_MAP.get(trend_raw, 'NONE')
-    entry = {
-        'type': 'sgv', 'sgv': glucose,
-        'date': int(time.time() * 1000),
-        'dateString': datetime.now(timezone.utc).isoformat(),
-        'direction': trend, 'device': 'Medtronic780G',
-    }
-    r = requests.post(f'{NS_HOST}/api/v1/entries', json=[entry], headers=NS_HEADERS)
-    print(f'NS glucose: {r.status_code} — {glucose} mg/dL {trend}')
-
-
-def upload_devicestatus(data):
-    s7   = data.get('stats7d',  {})
-    s14  = data.get('stats14d', {})
-    s30  = data.get('stats30d', {})
-    stod = data.get('statsToday', {})
-    pi   = data.get('pumpInfo', {})
-
-    status = {
-        'device': 'Medtronic780G',
-        'created_at': datetime.now(timezone.utc).isoformat(),
-        'pump': {
-            'autoMode':    stod.get('autoMode'),
-            'pumpModel':   pi.get('pumpModel'),
-            'sensorModel': pi.get('sensorModel'),
-        },
-        'cgmStats': {
-            'today': stod,
-            '7d':    s7,
-            '14d':   s14,
-            '30d':   s30,
-        },
-    }
-    r = requests.post(f'{NS_HOST}/api/v1/devicestatus', json=[status], headers=NS_HEADERS)
-    print(f'NS devicestatus: {r.status_code} — TIR7d={s7.get("tirNormal")}% avg7d={s7.get("avgSG")} TDD7d={s7.get("tdd")}u')
-
-
 def main():
     print('Starting CareLink uploader...')
     _init_firestore()
@@ -226,8 +171,6 @@ def main():
         try:
             data = client.getRecentData()
             if data and data.get('glucose'):
-                upload_glucose(data['glucose'], data.get('trend', 'NONE'))
-                upload_devicestatus(data)
                 write_to_firestore(data)
             else:
                 print('No glucose reading')
