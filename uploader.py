@@ -106,35 +106,66 @@ def _write_glucose_history(agg1d: list):
         print(f'Firestore history error: {e}')
 
 
-def write_to_firestore(data):
+def _write_rt_history(sgs: list):
+    """Write live display/message readings (high-res, last 24h) grouped by day."""
+    if not _fs or not sgs:
+        return
+    try:
+        col = _fs.collection('patients').document(PATIENT_ID).collection('glucoseByDay')
+        by_day: dict = {}
+        for r in sgs:
+            date_str = datetime.fromtimestamp(r['ts'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
+            by_day.setdefault(date_str, []).append(r)
+        for date_str, readings in by_day.items():
+            col.document(date_str).set(
+                {'readings': readings, 'updatedAt': datetime.now(timezone.utc).isoformat()})
+    except Exception as e:
+        print(f'Firestore rt-history error: {e}')
+
+
+def write_to_firestore(rt, batch):
     if not _fs:
         return
     try:
-        s7   = data.get('stats7d',    {})
-        s14  = data.get('stats14d',   {})
-        s30  = data.get('stats30d',   {})
-        stod = data.get('statsToday', {})
-        pi   = data.get('pumpInfo',   {})
-        trend = TREND_MAP.get(data.get('trend', 'NONE'), 'stable')
-        now = datetime.now(timezone.utc).isoformat()
+        batch = batch or {}
+        rt    = rt or {}
+        s7   = batch.get('stats7d',    {})
+        s14  = batch.get('stats14d',   {})
+        s30  = batch.get('stats30d',   {})
+        stod = batch.get('statsToday', {})
+        pi   = batch.get('pumpInfo',   {})
+        pump = rt.get('pump', {})
+        now  = datetime.now(timezone.utc).isoformat()
+        patient_name = batch.get('patientName')
+
+        # Prefer real-time glucose/trend; fall back to batch if sensor gap.
+        if rt.get('glucose'):
+            glucose, trend = rt['glucose'], rt.get('trend', 'stable')
+        else:
+            glucose, trend = batch.get('glucose'), TREND_MAP.get(batch.get('trend', 'NONE'), 'stable')
 
         meta = _fs.collection('patients').document(PATIENT_ID).collection('meta')
 
-        patient_name = data.get('patientName')
-
         meta.document('latestVitals').set({
-            'glucose':     data['glucose'],
+            'glucose':     glucose,
             'trend':       trend,
             'patientName': patient_name,
             'updatedAt':   now,
         }, merge=True)
 
         meta.document('latestPump').set({
-            'pumpModel':   pi.get('pumpModel'),
-            'sensorModel': pi.get('sensorModel'),
-            'autoMode':    stod.get('autoMode'),
-            'patientName': patient_name,
-            'updatedAt':   now,
+            'pumpModel':     pump.get('pumpModel') or pi.get('pumpModel'),
+            'sensorModel':   pi.get('sensorModel'),
+            'autoMode':      stod.get('autoMode'),
+            'reservoirLevel':  pump.get('reservoirUnits'),
+            'reservoirPercent': pump.get('reservoirPercent'),
+            'batteryLevel':    pump.get('batteryPercent'),
+            'activeInsulin':   pump.get('activeInsulin'),
+            'sensorBattery':   pump.get('sensorBattery'),
+            'sensorAgeHours':  pump.get('sensorDurationHours'),
+            'pumpMode':        'suspended' if pump.get('suspended') else 'auto',
+            'patientName':   patient_name,
+            'updatedAt':     now,
         }, merge=True)
 
         meta.document('latestStats').set({
@@ -142,14 +173,16 @@ def write_to_firestore(data):
             '7d':    {k: v for k, v in s7.items()   if v is not None},
             '14d':   {k: v for k, v in s14.items()  if v is not None},
             '30d':   {k: v for k, v in s30.items()  if v is not None},
-            'pumpModel':   pi.get('pumpModel'),
+            'pumpModel':   pump.get('pumpModel') or pi.get('pumpModel'),
             'sensorModel': pi.get('sensorModel'),
             'updatedAt':   now,
         })
 
-        # Write individual readings grouped by day
-        _write_glucose_history(data.get('rawAgg1d', []))
-        print(f'Firestore: written — sg={data["glucose"]} TIR7d={s7.get("tirNormal")}%')
+        # Glucose history: batch fills older days; live sgs overwrite recent days hi-res.
+        _write_glucose_history(batch.get('rawAgg1d', []))
+        _write_rt_history(rt.get('sgs', []))
+        print(f'Firestore: written — sg={glucose} ({"live" if rt.get("glucose") else "batch"}) '
+              f'trend={trend} TIR7d={s7.get("tirNormal")}%')
     except Exception as e:
         print(f'Firestore write error: {e}')
 
@@ -167,17 +200,12 @@ def main():
     client = CareLinkClient(cookies=cookies, on_cookies_updated=_save_cookies)
     print('Ready (web reauth mode — no browser needed)')
 
-    # TEMP DIAGNOSTIC — one-time real-time endpoint probe (remove after diagnosis)
-    try:
-        client.probe_realtime()
-    except Exception as e:
-        print(f'PROBE: crashed {e}')
-
     while True:
         try:
-            data = client.getRecentData()
-            if data and data.get('glucose'):
-                write_to_firestore(data)
+            batch = client.getRecentData()       # reauths; multi-day stats + patient name
+            rt    = client.getRealtimeData()      # live SG + pump status
+            if (rt and rt.get('glucose')) or (batch and batch.get('glucose')):
+                write_to_firestore(rt, batch)
             else:
                 print('No glucose reading')
         except Exception as e:

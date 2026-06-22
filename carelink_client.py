@@ -23,6 +23,40 @@ CLCLOUD_BASE  = "https://clcloud.minimed.eu"
 REAUTH_URL    = f"{CARELINK_BASE}/patient/sso/reauth"
 DATA_URL      = f"{CLCLOUD_BASE}/connect/retina/v1/personalWebView"
 USERS_ME_URL  = f"{CARELINK_BASE}/patient/users/me"
+DISPLAY_URL   = f"{CLCLOUD_BASE}/connect/carepartner/v6/display/message"
+
+# display/message lastSGTrend -> VoiceCare GlucoseTrend
+RT_TREND_MAP = {
+    "NONE": "stable", "FLAT": "stable",
+    "UP": "rising", "SINGLE_UP": "rising", "FORTY_FIVE_UP": "rising", "UP_45": "rising",
+    "DOUBLE_UP": "risingFast", "UP_DOUBLE": "risingFast", "TRIPLE_UP": "risingFast",
+    "DOWN": "falling", "SINGLE_DOWN": "falling", "FORTY_FIVE_DOWN": "falling", "DOWN_45": "falling",
+    "DOUBLE_DOWN": "fallingFast", "DOWN_DOUBLE": "fallingFast", "TRIPLE_DOWN": "fallingFast",
+}
+
+
+def _map_rt_trend(t):
+    if not t:
+        return "stable"
+    if t in RT_TREND_MAP:
+        return RT_TREND_MAP[t]
+    u = t.upper()
+    fast = "DOUBLE" in u or "TRIPLE" in u
+    if "UP" in u:
+        return "risingFast" if fast else "rising"
+    if "DOWN" in u:
+        return "fallingFast" if fast else "falling"
+    return "stable"
+
+
+def _iso_to_ms(s):
+    if not s:
+        return None
+    try:
+        from datetime import datetime
+        return int(datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() * 1000)
+    except Exception:
+        return None
 
 # Refresh the token when it has less than this many seconds of life left.
 REFRESH_MARGIN_SEC = 8 * 60
@@ -207,76 +241,86 @@ class CareLinkClient:
             b = self.token.split(".")[1]
             b += "=" * ((4 - len(b) % 4) % 4)
             return json.loads(base64.urlsafe_b64decode(b).decode())
-        except Exception as e:
-            print(f"PROBE: jwt decode error {e}")
+        except Exception:
             return {}
 
-    def probe_realtime(self):
-        """TEMP DIAGNOSTIC: does the live web token reach the carepartner
-        real-time display/message endpoint? Logs results with 'PROBE:' prefix.
-        Read-only; safe to run in production. Remove after diagnosis."""
-        self.reauth()
-        if not self.token:
-            print("PROBE: no live token — cannot test")
-            return
-        H = {"Authorization": f"Bearer {self.token}", "Accept": "application/json",
-             "Content-Type": "application/json"}
-
-        # username must come from the token JWT (token_details.preferred_username)
+    def _username_from_token(self):
         p = self._jwt_payload()
-        td = p.get("token_details", {}) if isinstance(p.get("token_details"), dict) else {}
-        print(f"PROBE: jwt keys={list(p.keys())[:15]} token_details keys={list(td.keys())[:15]}")
-        u_candidates = [
-            td.get("preferred_username"),
-            p.get("preferred_username"),
-            p.get("username"),
-            p.get("sub"),
-        ]
-        u_candidates = [u for u in u_candidates if u]
-        print(f"PROBE: username candidates={u_candidates}")
+        td = p.get("token_details", {})
+        if isinstance(td, dict) and td.get("preferred_username"):
+            return td["preferred_username"]
+        return p.get("preferred_username")
 
-        ble_ep = "https://clcloud.minimed.eu/connect/carepartner/v6/display/message"
+    def getRealtimeData(self):
+        """Real-time sensor glucose + pump status via the carepartner
+        display/message endpoint, authenticated with the existing web token.
+        Returns dict {glucose, trend, tsMs, sgs[], pump{}} or None."""
+        if self._needs_reauth():
+            self.reauth()
+        user = self._username_from_token()
+        if not user:
+            print("realtime: no username in token")
+            return None
+
+        H = {"Authorization": f"Bearer {self.token}",
+             "Accept": "application/json", "Content-Type": "application/json"}
+        payload = {"username": user, "role": "patient"}
+
         try:
-            s = self.session.get(f"{CARELINK_BASE}/patient/countries/settings?countryCode=il&language=en",
-                                 headers=H, timeout=20)
-            if s.status_code == 200:
-                import re
-                m = re.search(r'(https://[^"]*display/message)', s.text)
-                if m:
-                    ble_ep = m.group(1)
-            print(f"PROBE: endpoint={ble_ep}")
+            r = self.session.post(DISPLAY_URL, headers=H, json=payload, timeout=25)
+            if r.status_code == 401:
+                if self.reauth():
+                    H["Authorization"] = f"Bearer {self.token}"
+                    r = self.session.post(DISPLAY_URL, headers=H, json=payload, timeout=25)
+            if r.status_code != 200:
+                print(f"realtime: HTTP {r.status_code}: {r.text[:150]}")
+                return None
+            return self._parse_realtime(r.json())
         except Exception as e:
-            print(f"PROBE: countries/settings error {e}")
+            print(f"realtime fetch error: {e}")
+            return None
 
-        if not u_candidates:
-            print("PROBE: no username in token — cannot build payload")
-            return
-        for u in dict.fromkeys(u_candidates):
-            payload = {"username": u, "role": "patient"}
-            try:
-                r = self.session.post(ble_ep, headers=H, json=payload, timeout=25)
-                print(f"PROBE: POST username={u} role=patient -> {r.status_code}")
-                if r.status_code == 200:
-                    j = r.json()
-                    print(f"PROBE: TOPKEYS={sorted(j.keys())}")
-                    for k in ("lastSG", "lastSGTrend", "lastAlarm", "sensorState",
-                              "conduitSensorInRange", "reservoirRemainingUnits",
-                              "reservoirLevelPercent", "medicalDeviceBatteryLevelPercent",
-                              "activeInsulin", "sensorDurationHours", "timeToNextCalibHours",
-                              "lastSensorTime", "averageSG", "belowHypoLimit", "aboveHyperLimit",
-                              "systemStatusMessage", "conduitInRange", "gstBatteryLevel"):
-                        if k in j:
-                            print(f"PROBE:   {k} = {json.dumps(j[k])[:200]}")
-                    sgs = j.get("sgs") or j.get("lastSGs")
-                    if isinstance(sgs, list):
-                        print(f"PROBE:   sgs len={len(sgs)} last={json.dumps(sgs[-1])[:200] if sgs else None}")
-                    print("PROBE: *** REAL-TIME REACHED ***")
-                    return
-                else:
-                    print(f"PROBE:   body={r.text[:200]}")
-            except Exception as e:
-                print(f"PROBE: POST username={u} error {e}")
-        print("PROBE: done")
+    def _parse_realtime(self, j):
+        last = j.get("lastSG") or {}
+        sg = last.get("sg")
+        if not sg or sg <= 0:
+            print("realtime: no current SG (sensor gap?)")
+            return None
+
+        ai = j.get("activeInsulin") or {}
+        pump = {
+            "reservoirUnits":      j.get("reservoirRemainingUnits"),
+            "reservoirPercent":    j.get("reservoirLevelPercent"),
+            "batteryPercent":      j.get("medicalDeviceBatteryLevelPercent"),
+            "activeInsulin":       ai.get("amount"),
+            "sensorDurationHours": j.get("sensorDurationHours"),
+            "sensorBattery":       j.get("gstBatteryLevel"),
+            "pumpModel":           j.get("pumpModelNumber"),
+            "suspended":           j.get("medicalDeviceSuspended"),
+            "sensorState":         j.get("sensorState"),
+            "conduitInRange":      j.get("conduitInRange"),
+            "averageSG":           j.get("averageSG"),
+        }
+        pump = {k: v for k, v in pump.items() if v is not None}
+
+        sgs = []
+        for s in j.get("sgs", []):
+            v = s.get("sg", 0)
+            ms = _iso_to_ms(s.get("datetime"))
+            if v and v > 0 and ms:
+                sgs.append({"ts": ms, "sgv": v})
+
+        result = {
+            "glucose": sg,
+            "trend":   _map_rt_trend(j.get("lastSGTrend")),
+            "tsMs":    _iso_to_ms(last.get("datetime")),
+            "sgs":     sgs,
+            "pump":    pump,
+        }
+        print(f"realtime OK — sg={sg} trend={result['trend']} "
+              f"reservoir={pump.get('reservoirUnits')}u batt={pump.get('batteryPercent')}% "
+              f"iob={pump.get('activeInsulin')} sgs={len(sgs)}")
+        return result
 
     def _parse(self, data):
         mgdl = data["ResponsePayload"]["mgdl"]
