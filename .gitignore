@@ -17,6 +17,7 @@ test_login.py
 explore_login.py
 debug_login.py
 local_login.py
+probe_realtime.py
 
 # Python
 __pycache__/

@@ -167,6 +167,12 @@ def main():
     client = CareLinkClient(cookies=cookies, on_cookies_updated=_save_cookies)
     print('Ready (web reauth mode — no browser needed)')
 
+    # TEMP DIAGNOSTIC — one-time real-time endpoint probe (remove after diagnosis)
+    try:
+        client.probe_realtime()
+    except Exception as e:
+        print(f'PROBE: crashed {e}')
+
     while True:
         try:
             data = client.getRecentData()

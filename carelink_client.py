@@ -202,6 +202,63 @@ class CareLinkClient:
             print(f"data fetch error: {e}")
             return None
 
+    def probe_realtime(self):
+        """TEMP DIAGNOSTIC: does the live web token reach the carepartner
+        real-time display/message endpoint? Logs results with 'PROBE:' prefix.
+        Read-only; safe to run in production. Remove after diagnosis."""
+        self.reauth()
+        if not self.token:
+            print("PROBE: no live token — cannot test")
+            return
+        H = {"Authorization": f"Bearer {self.token}", "Accept": "application/json"}
+
+        role, username = None, None
+        try:
+            me = self.session.get(USERS_ME_URL, headers=H, timeout=20)
+            print(f"PROBE: /users/me -> {me.status_code}")
+            if me.status_code == 200:
+                j = me.json()
+                role = j.get("role") or j.get("accountType")
+                username = j.get("username") or j.get("loginId") or j.get("email")
+                print(f"PROBE: role={role} username={username} keys={list(j.keys())[:12]}")
+        except Exception as e:
+            print(f"PROBE: /users/me error {e}")
+
+        ble_ep = None
+        try:
+            s = self.session.get(f"{CARELINK_BASE}/patient/countries/settings?countryCode=il&language=en",
+                                 headers=H, timeout=20)
+            print(f"PROBE: countries/settings -> {s.status_code}")
+            if s.status_code == 200:
+                txt = s.text
+                # crude extract of the (typo'd) ble endpoint
+                import re
+                m = re.search(r'"[^"]*[Pp]er?eriodic[^"]*"\s*:\s*"([^"]+)"', txt) or \
+                    re.search(r'(https://[^"]*display/message)', txt)
+                ble_ep = m.group(1) if m else None
+                print(f"PROBE: blePereodicDataEndpoint={ble_ep}")
+        except Exception as e:
+            print(f"PROBE: countries/settings error {e}")
+
+        targets = [t for t in [ble_ep,
+                               "https://clcloud.minimed.eu/connect/carepartner/v6/display/message"] if t]
+        roles = [r for r in [role, "PATIENT_OUS", "PATIENT", "patient"] if r]
+        for ep in dict.fromkeys(targets):
+            for rl in dict.fromkeys(roles):
+                payload = {"role": rl}
+                if username:
+                    payload["username"] = username
+                try:
+                    r = self.session.post(ep, headers=H, json=payload, timeout=25)
+                    body = r.text[:300].replace("\n", " ")
+                    print(f"PROBE: POST {ep[-30:]} role={rl} -> {r.status_code} | {body}")
+                    if r.status_code == 200 and ("\"sg\"" in r.text.lower() or "lastsg" in r.text.lower()):
+                        print("PROBE: *** REAL-TIME REACHED WITH WEB TOKEN ***")
+                        return
+                except Exception as e:
+                    print(f"PROBE: POST {ep[-30:]} role={rl} error {e}")
+        print("PROBE: done — no real-time data via web token")
+
     def _parse(self, data):
         mgdl = data["ResponsePayload"]["mgdl"]
 
