@@ -54,7 +54,19 @@ def _iso_to_ms(s):
         return None
     try:
         from datetime import datetime
-        return int(datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() * 1000)
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            # CareLink returns naive datetimes in the patient's LOCAL time. Treating them
+            # as UTC shifted every reading by the local offset (e.g. +3h in Israel), which
+            # made the dashboard chart show future/wrong hours. Anchor to the patient's tz.
+            import os
+            try:
+                from zoneinfo import ZoneInfo
+                dt = dt.replace(tzinfo=ZoneInfo(os.environ.get("PATIENT_TZ", "Asia/Jerusalem")))
+            except Exception:
+                from datetime import timezone, timedelta
+                dt = dt.replace(tzinfo=timezone(timedelta(hours=3)))  # fallback if tzdata is missing
+        return int(dt.timestamp() * 1000)
     except Exception:
         return None
 
