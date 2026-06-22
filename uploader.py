@@ -138,20 +138,17 @@ def write_to_firestore(rt, batch):
         now  = datetime.now(timezone.utc).isoformat()
         patient_name = batch.get('patientName')
 
-        # Prefer real-time glucose/trend; fall back to batch if sensor gap.
-        if rt.get('glucose'):
-            glucose, trend = rt['glucose'], rt.get('trend', 'stable')
-        else:
-            glucose, trend = batch.get('glucose'), TREND_MAP.get(batch.get('trend', 'NONE'), 'stable')
-
         meta = _fs.collection('patients').document(PATIENT_ID).collection('meta')
 
-        meta.document('latestVitals').set({
-            'glucose':     glucose,
-            'trend':       trend,
-            'patientName': patient_name,
-            'updatedAt':   now,
-        }, merge=True)
+        # Current glucose comes ONLY from real-time. The batch/daily value is a stale
+        # summary artifact (a fixed ~113) and must never clobber the live reading. On a
+        # sensor gap we omit glucose/trend entirely — merge=True keeps the last good
+        # value, and the app's freshness indicator then flags it as not-transmitting.
+        vitals = {'patientName': patient_name, 'updatedAt': now}
+        if rt.get('glucose'):
+            vitals['glucose'] = rt['glucose']
+            vitals['trend']   = rt.get('trend', 'stable')
+        meta.document('latestVitals').set(vitals, merge=True)
 
         meta.document('latestPump').set({
             'pumpModel':     pump.get('pumpModel') or pi.get('pumpModel'),
@@ -181,8 +178,12 @@ def write_to_firestore(rt, batch):
         # Glucose history: batch fills older days; live sgs overwrite recent days hi-res.
         _write_glucose_history(batch.get('rawAgg1d', []))
         _write_rt_history(rt.get('sgs', []))
-        print(f'Firestore: written — sg={glucose} ({"live" if rt.get("glucose") else "batch"}) '
-              f'trend={trend} TIR7d={s7.get("tirNormal")}%')
+        if rt.get('glucose'):
+            print(f'Firestore: written — sg={rt["glucose"]} (live) '
+                  f'trend={rt.get("trend", "stable")} TIR7d={s7.get("tirNormal")}%')
+        else:
+            print(f'Firestore: sensor gap — glucose left unchanged; stats/pump updated. '
+                  f'TIR7d={s7.get("tirNormal")}%')
     except Exception as e:
         print(f'Firestore write error: {e}')
 
