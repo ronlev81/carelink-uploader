@@ -255,11 +255,25 @@ class CareLinkClient:
             payload = {"username": u, "role": "patient"}
             try:
                 r = self.session.post(ble_ep, headers=H, json=payload, timeout=25)
-                body = r.text[:400].replace("\n", " ")
-                print(f"PROBE: POST username={u} role=patient -> {r.status_code} | {body}")
-                if r.status_code == 200 and ('"sg"' in r.text.lower() or "lastsg" in r.text.lower()):
-                    print("PROBE: *** REAL-TIME REACHED WITH WEB TOKEN ***")
+                print(f"PROBE: POST username={u} role=patient -> {r.status_code}")
+                if r.status_code == 200:
+                    j = r.json()
+                    print(f"PROBE: TOPKEYS={sorted(j.keys())}")
+                    for k in ("lastSG", "lastSGTrend", "lastAlarm", "sensorState",
+                              "conduitSensorInRange", "reservoirRemainingUnits",
+                              "reservoirLevelPercent", "medicalDeviceBatteryLevelPercent",
+                              "activeInsulin", "sensorDurationHours", "timeToNextCalibHours",
+                              "lastSensorTime", "averageSG", "belowHypoLimit", "aboveHyperLimit",
+                              "systemStatusMessage", "conduitInRange", "gstBatteryLevel"):
+                        if k in j:
+                            print(f"PROBE:   {k} = {json.dumps(j[k])[:200]}")
+                    sgs = j.get("sgs") or j.get("lastSGs")
+                    if isinstance(sgs, list):
+                        print(f"PROBE:   sgs len={len(sgs)} last={json.dumps(sgs[-1])[:200] if sgs else None}")
+                    print("PROBE: *** REAL-TIME REACHED ***")
                     return
+                else:
+                    print(f"PROBE:   body={r.text[:200]}")
             except Exception as e:
                 print(f"PROBE: POST username={u} error {e}")
         print("PROBE: done")
