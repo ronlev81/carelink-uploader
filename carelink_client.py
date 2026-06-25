@@ -340,10 +340,12 @@ class CareLinkClient:
             "sgs":     sgs,
             "pump":    pump,
         }
+        _rem_h = pump.get('sensorDurationHours')  # remaining hours (counts down from 168)
+        _age_h = (168 - _rem_h) if _rem_h is not None else None
         print(f"realtime OK — sg={sg} trend={result['trend']} "
               f"reservoir={pump.get('reservoirUnits')}u batt={pump.get('batteryPercent')}% "
               f"iob={pump.get('activeInsulin')} "
-              f"sensorAge={pump.get('sensorDurationHours')}h sensorBatt={pump.get('sensorBattery')}% "
+              f"sensorAge={_age_h}h sensorRemaining={_rem_h}h sensorBatt={pump.get('sensorBattery')}% "
               f"sgs={len(sgs)}")
         return result
 
