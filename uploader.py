@@ -150,20 +150,23 @@ def write_to_firestore(rt, batch):
             vitals['trend']   = rt.get('trend', 'stable')
         meta.document('latestVitals').set(vitals, merge=True)
 
-        meta.document('latestPump').set({
-            'pumpModel':     pump.get('pumpModel') or pi.get('pumpModel'),
-            'sensorModel':   pi.get('sensorModel'),
-            'autoMode':      stod.get('autoMode'),
-            'reservoirLevel':  pump.get('reservoirUnits'),
+        # Only write fields that are non-None — merge=True with a None value would
+        # overwrite a previously good reading with null (e.g. sensorAgeHours during gap).
+        pump_doc = {k: v for k, v in {
+            'pumpModel':      pump.get('pumpModel') or pi.get('pumpModel'),
+            'sensorModel':    pi.get('sensorModel'),
+            'autoMode':       stod.get('autoMode'),
+            'reservoirLevel':   pump.get('reservoirUnits'),
             'reservoirPercent': pump.get('reservoirPercent'),
-            'batteryLevel':    pump.get('batteryPercent'),
-            'activeInsulin':   pump.get('activeInsulin'),
-            'sensorBattery':   pump.get('sensorBattery'),
-            'sensorAgeHours':  pump.get('sensorDurationHours'),
-            'pumpMode':        'suspended' if pump.get('suspended') else 'auto',
-            'patientName':   patient_name,
-            'updatedAt':     now,
-        }, merge=True)
+            'batteryLevel':     pump.get('batteryPercent'),
+            'activeInsulin':    pump.get('activeInsulin'),
+            'sensorBattery':    pump.get('sensorBattery'),
+            'sensorAgeHours':   pump.get('sensorDurationHours'),
+            'pumpMode':         'suspended' if pump.get('suspended') else 'auto',
+        }.items() if v is not None}
+        pump_doc['patientName'] = patient_name
+        pump_doc['updatedAt']   = now
+        meta.document('latestPump').set(pump_doc, merge=True)
 
         meta.document('latestStats').set({
             'today': {k: v for k, v in stod.items() if v is not None},

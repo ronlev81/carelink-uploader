@@ -293,12 +293,7 @@ class CareLinkClient:
             return None
 
     def _parse_realtime(self, j):
-        last = j.get("lastSG") or {}
-        sg = last.get("sg")
-        if not sg or sg <= 0:
-            print("realtime: no current SG (sensor gap?)")
-            return None
-
+        # Extract pump data unconditionally — present even during sensor gaps.
         ai = j.get("activeInsulin") or {}
         pump = {
             "reservoirUnits":      j.get("reservoirRemainingUnits"),
@@ -315,12 +310,28 @@ class CareLinkClient:
         }
         pump = {k: v for k, v in pump.items() if v is not None}
 
+        # Diagnostic: log all sensor/gst keys so we can spot API field-name changes.
+        sensor_keys = {k: v for k, v in j.items() if "sensor" in k.lower() or "gst" in k.lower()}
+        if sensor_keys:
+            print(f"realtime sensor fields: {sensor_keys}")
+        else:
+            print("realtime: no sensor*/gst* keys in API response — sensorAgeHours/sensorBattery will be absent")
+
         sgs = []
         for s in j.get("sgs", []):
             v = s.get("sg", 0)
             ms = _iso_to_ms(s.get("datetime"))
             if v and v > 0 and ms:
                 sgs.append({"ts": ms, "sgv": v})
+
+        last = j.get("lastSG") or {}
+        sg = last.get("sg")
+        if not sg or sg <= 0:
+            # Sensor gap: no live glucose but pump data is still valid — return it.
+            print(f"realtime: sensor gap — no SG, pump-only "
+                  f"reservoir={pump.get('reservoirUnits')}u batt={pump.get('batteryPercent')}% "
+                  f"sensorAge={pump.get('sensorDurationHours')}h sensorBatt={pump.get('sensorBattery')}%")
+            return {"pump": pump, "sgs": []} if pump else None
 
         result = {
             "glucose": sg,
@@ -331,7 +342,9 @@ class CareLinkClient:
         }
         print(f"realtime OK — sg={sg} trend={result['trend']} "
               f"reservoir={pump.get('reservoirUnits')}u batt={pump.get('batteryPercent')}% "
-              f"iob={pump.get('activeInsulin')} sgs={len(sgs)}")
+              f"iob={pump.get('activeInsulin')} "
+              f"sensorAge={pump.get('sensorDurationHours')}h sensorBatt={pump.get('sensorBattery')}% "
+              f"sgs={len(sgs)}")
         return result
 
     def _parse(self, data):
