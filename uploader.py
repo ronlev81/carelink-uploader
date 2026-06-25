@@ -170,6 +170,9 @@ def write_to_firestore(rt, batch):
         pump_doc['patientName'] = patient_name
         pump_doc['updatedAt']   = now
         meta.document('latestPump').set(pump_doc, merge=True)
+        # merge=True never deletes fields — explicitly clear stale age during warm-up.
+        if sensor_state == 'WARM_UP':
+            meta.document('latestPump').update({'sensorAgeHours': firestore.firestore.DELETE_FIELD})
 
         meta.document('latestStats').set({
             'today': {k: v for k, v in stod.items() if v is not None},
