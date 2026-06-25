@@ -152,6 +152,7 @@ def write_to_firestore(rt, batch):
 
         # Only write fields that are non-None — merge=True with a None value would
         # overwrite a previously good reading with null (e.g. sensorAgeHours during gap).
+        sensor_state = pump.get('sensorState')
         pump_doc = {k: v for k, v in {
             'pumpModel':      pump.get('pumpModel') or pi.get('pumpModel'),
             'sensorModel':    pi.get('sensorModel'),
@@ -161,7 +162,9 @@ def write_to_firestore(rt, batch):
             'batteryLevel':     pump.get('batteryPercent'),
             'activeInsulin':    pump.get('activeInsulin'),
             'sensorBattery':    pump.get('sensorBattery'),
-            'sensorAgeHours':   pump.get('sensorDurationHours'),
+            # During WARM_UP the sensorDurationHours is stale from the old sensor — omit it.
+            'sensorAgeHours':   None if sensor_state == 'WARM_UP' else pump.get('sensorDurationHours'),
+            'sensorState':      sensor_state,
             'pumpMode':         'suspended' if pump.get('suspended') else 'auto',
         }.items() if v is not None}
         pump_doc['patientName'] = patient_name
