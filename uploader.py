@@ -153,6 +153,11 @@ def write_to_firestore(rt, batch):
         # Only write fields that are non-None — merge=True with a None value would
         # overwrite a previously good reading with null (e.g. sensorAgeHours during gap).
         sensor_state = pump.get('sensorState')
+        # CareLink sensorDurationHours counts DOWN from 168 (remaining hours, not elapsed).
+        # Convert to elapsed so the UI can display age and remaining correctly.
+        SENSOR_LIFE_H = 168
+        raw_remaining = pump.get('sensorDurationHours')
+        sensor_age = (SENSOR_LIFE_H - raw_remaining) if raw_remaining is not None else None
         pump_doc = {k: v for k, v in {
             'pumpModel':      pump.get('pumpModel') or pi.get('pumpModel'),
             'sensorModel':    pi.get('sensorModel'),
@@ -162,8 +167,7 @@ def write_to_firestore(rt, batch):
             'batteryLevel':     pump.get('batteryPercent'),
             'activeInsulin':    pump.get('activeInsulin'),
             'sensorBattery':    pump.get('sensorBattery'),
-            # During WARM_UP the sensorDurationHours is stale from the old sensor — omit it.
-            'sensorAgeHours':   None if sensor_state == 'WARM_UP' else pump.get('sensorDurationHours'),
+            'sensorAgeHours':   None if sensor_state == 'WARM_UP' else sensor_age,
             'sensorState':      sensor_state,
             'pumpMode':         'suspended' if pump.get('suspended') else 'auto',
         }.items() if v is not None}
