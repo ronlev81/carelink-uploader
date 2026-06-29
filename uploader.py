@@ -4,17 +4,16 @@ import time
 from datetime import datetime, timezone
 from carelink_client import CareLinkClient
 
-INTERVAL   = int(os.environ.get('UPLOAD_INTERVAL', '300'))
-PATIENT_ID = os.environ.get('PATIENT_ID', 'patient_001')
+INTERVAL        = int(os.environ.get('UPLOAD_INTERVAL', '300'))
+PATIENT_ID      = os.environ.get('PATIENT_ID', '')  # legacy single-patient fallback
+REFRESH_CYCLES  = 12  # re-fetch patient list every N cycles (~1 h at 300 s)
 
-# CareLink trend code -> VoiceCare GlucoseTrend value (used for Firestore)
 TREND_MAP = {
     'NONE': 'stable', 'FLAT': 'stable',
     'SLIGHTLY_UP': 'rising', 'UP': 'rising', 'RAPIDLY_UP': 'risingFast',
     'SLIGHTLY_DOWN': 'falling', 'DOWN': 'falling', 'RAPIDLY_DOWN': 'fallingFast',
 }
 
-# --- Firestore setup (optional — skipped if FIREBASE_SERVICE_ACCOUNT not set) ---
 _fs = None
 
 def _init_firestore():
@@ -36,58 +35,78 @@ def _init_firestore():
         print(f'Firestore init error: {e}')
 
 
-# --- CareLink cookie jar persistence (Firestore is the source of truth) ---
+def fetch_active_patients():
+    """Return list of patient IDs where monitoringStatus in ('active', 'needs_reauth')."""
+    if not _fs:
+        return [PATIENT_ID] if PATIENT_ID else []
+    try:
+        docs = _fs.collection('patients').where('monitoringStatus', 'in', ['active', 'needs_reauth']).stream()
+        ids = [d.id for d in docs]
+        print(f'Active patients: {ids}')
+        return ids
+    except Exception as e:
+        print(f'fetch_active_patients error: {e}')
+        return [PATIENT_ID] if PATIENT_ID else []
 
-def _save_cookies(cookies):
-    """Persist the (rolling) CareLink cookie jar after each reauth."""
+
+def mark_needs_reauth(patient_id):
     if not _fs:
         return
     try:
-        (_fs.collection('patients').document(PATIENT_ID)
+        _fs.collection('patients').document(patient_id).set(
+            {'monitoringStatus': 'needs_reauth'},
+            merge=True,
+        )
+        print(f'{patient_id}: marked needs_reauth')
+    except Exception as e:
+        print(f'{patient_id}: mark_needs_reauth error: {e}')
+
+
+def _save_cookies(patient_id, cookies):
+    if not _fs:
+        return
+    try:
+        (_fs.collection('patients').document(patient_id)
             .collection('secrets').document('carelinkSession')
             .set({'cookies': cookies, 'updatedAt': datetime.now(timezone.utc).isoformat()}))
-        print(f'Firestore: saved {len(cookies)} CareLink cookies')
+        print(f'{patient_id}: saved {len(cookies)} CareLink cookies')
     except Exception as e:
-        print(f'Firestore cookie save error: {e}')
+        print(f'{patient_id}: cookie save error: {e}')
 
 
-def _load_cookies():
-    """Load cookies from Firestore (latest refreshed jar); fall back to COOKIE_JAR env for first seed.
-
-    Set RESEED=1 to force-use COOKIE_JAR env (overwrites the stored jar) — used when the
-    Auth0 session finally expires and you've captured a fresh login.
-    """
+def _load_cookies(patient_id):
+    """Load from Firestore; fall back to COOKIE_JAR env (single-patient legacy)."""
     reseed = os.environ.get('RESEED') == '1'
     if not reseed and _fs:
         try:
-            doc = (_fs.collection('patients').document(PATIENT_ID)
+            doc = (_fs.collection('patients').document(patient_id)
                       .collection('secrets').document('carelinkSession').get())
             if doc.exists:
                 cookies = (doc.to_dict() or {}).get('cookies')
                 if cookies:
-                    print(f'Loaded {len(cookies)} CareLink cookies from Firestore')
+                    print(f'{patient_id}: loaded {len(cookies)} cookies from Firestore')
                     return cookies
         except Exception as e:
-            print(f'Firestore cookie load error: {e}')
-
-    env = os.environ.get('COOKIE_JAR')
-    if env:
-        try:
-            cookies = json.loads(env)
-            print(f'Loaded {len(cookies)} CareLink cookies from COOKIE_JAR env (initial seed)')
-            _save_cookies(cookies)  # promote into Firestore for next boot
-            return cookies
-        except Exception as e:
-            print(f'COOKIE_JAR parse error: {e}')
+            print(f'{patient_id}: cookie load error: {e}')
+    # Legacy single-patient env fallback.
+    if patient_id == PATIENT_ID:
+        env = os.environ.get('COOKIE_JAR')
+        if env:
+            try:
+                cookies = json.loads(env)
+                print(f'{patient_id}: loaded {len(cookies)} cookies from COOKIE_JAR env (seed)')
+                _save_cookies(patient_id, cookies)
+                return cookies
+            except Exception as e:
+                print(f'{patient_id}: COOKIE_JAR parse error: {e}')
     return None
 
 
-def _write_glucose_history(agg1d: list):
-    """Write sgVal readings to patients/{id}/glucoseByDay/{YYYY-MM-DD}."""
+def _write_glucose_history(patient_id, agg1d):
     if not _fs or not agg1d:
         return
     try:
-        col = _fs.collection('patients').document(PATIENT_ID).collection('glucoseByDay')
+        col = _fs.collection('patients').document(patient_id).collection('glucoseByDay')
         for day in agg1d:
             readings = [
                 {'ts': r['ts'] * 1000, 'sgv': r['sg']}
@@ -96,72 +115,60 @@ def _write_glucose_history(agg1d: list):
             ]
             if not readings:
                 continue
-            # Use the date of the first reading as doc ID
-            date_str = datetime.fromtimestamp(
-                readings[0]['ts'] / 1000, tz=timezone.utc
-            ).strftime('%Y-%m-%d')
+            date_str = datetime.fromtimestamp(readings[0]['ts'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
             col.document(date_str).set({'readings': readings, 'updatedAt': datetime.now(timezone.utc).isoformat()})
-        print(f'Firestore: glucose history written ({len(agg1d)} days)')
+        print(f'{patient_id}: glucose history written ({len(agg1d)} days)')
     except Exception as e:
-        print(f'Firestore history error: {e}')
+        print(f'{patient_id}: history error: {e}')
 
 
-def _write_rt_history(sgs: list):
-    """Write live display/message readings (high-res, last 24h) grouped by day."""
+def _write_rt_history(patient_id, sgs):
     if not _fs or not sgs:
         return
     try:
-        col = _fs.collection('patients').document(PATIENT_ID).collection('glucoseByDay')
-        by_day: dict = {}
+        col = _fs.collection('patients').document(patient_id).collection('glucoseByDay')
+        by_day = {}
         for r in sgs:
             date_str = datetime.fromtimestamp(r['ts'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
             by_day.setdefault(date_str, []).append(r)
         for date_str, readings in by_day.items():
-            col.document(date_str).set(
-                {'readings': readings, 'updatedAt': datetime.now(timezone.utc).isoformat()})
+            col.document(date_str).set({'readings': readings, 'updatedAt': datetime.now(timezone.utc).isoformat()})
     except Exception as e:
-        print(f'Firestore rt-history error: {e}')
+        print(f'{patient_id}: rt-history error: {e}')
 
 
-def write_to_firestore(rt, batch):
+def write_to_firestore(patient_id, rt, batch):
     if not _fs:
         return
     try:
-        batch = batch or {}
+        from firebase_admin import firestore as fb_firestore
+        batch_data = batch or {}
         rt    = rt or {}
-        s7   = batch.get('stats7d',    {})
-        s14  = batch.get('stats14d',   {})
-        s30  = batch.get('stats30d',   {})
-        stod = batch.get('statsToday', {})
-        pi   = batch.get('pumpInfo',   {})
+        s7   = batch_data.get('stats7d',    {})
+        s14  = batch_data.get('stats14d',   {})
+        s30  = batch_data.get('stats30d',   {})
+        stod = batch_data.get('statsToday', {})
+        pi   = batch_data.get('pumpInfo',   {})
         pump = rt.get('pump', {})
         now  = datetime.now(timezone.utc).isoformat()
-        patient_name = batch.get('patientName')
+        patient_name = batch_data.get('patientName')
 
-        meta = _fs.collection('patients').document(PATIENT_ID).collection('meta')
+        meta = _fs.collection('patients').document(patient_id).collection('meta')
 
-        # Current glucose comes ONLY from real-time. The batch/daily value is a stale
-        # summary artifact (a fixed ~113) and must never clobber the live reading. On a
-        # sensor gap we omit glucose/trend entirely — merge=True keeps the last good
-        # value, and the app's freshness indicator then flags it as not-transmitting.
         vitals = {'patientName': patient_name, 'updatedAt': now}
         if rt.get('glucose'):
             vitals['glucose'] = rt['glucose']
             vitals['trend']   = rt.get('trend', 'stable')
         meta.document('latestVitals').set(vitals, merge=True)
 
-        # Only write fields that are non-None — merge=True with a None value would
-        # overwrite a previously good reading with null (e.g. sensorAgeHours during gap).
         sensor_state = pump.get('sensorState')
-        # CareLink sensorDurationHours counts DOWN from 168 (remaining hours, not elapsed).
-        # Convert to elapsed so the UI can display age and remaining correctly.
         SENSOR_LIFE_H = 168
         raw_remaining = pump.get('sensorDurationHours')
         sensor_age = (SENSOR_LIFE_H - raw_remaining) if raw_remaining is not None else None
         pump_doc = {k: v for k, v in {
-            'pumpModel':      pump.get('pumpModel') or pi.get('pumpModel'),
-            'sensorModel':    pi.get('sensorModel'),
-            'autoMode':       stod.get('autoMode'),
+            'pumpModel':        pump.get('pumpModel') or pi.get('pumpModel'),
+            'sensorModel':      pi.get('sensorModel'),
+            'autoMode':         stod.get('autoMode'),
             'reservoirLevel':   pump.get('reservoirUnits'),
             'reservoirPercent': pump.get('reservoirPercent'),
             'batteryLevel':     pump.get('batteryPercent'),
@@ -174,9 +181,8 @@ def write_to_firestore(rt, batch):
         pump_doc['patientName'] = patient_name
         pump_doc['updatedAt']   = now
         meta.document('latestPump').set(pump_doc, merge=True)
-        # merge=True never deletes fields — explicitly clear stale age during warm-up.
         if sensor_state == 'WARM_UP':
-            meta.document('latestPump').update({'sensorAgeHours': firestore.firestore.DELETE_FIELD})
+            meta.document('latestPump').update({'sensorAgeHours': fb_firestore.DELETE_FIELD})
 
         meta.document('latestStats').set({
             'today': {k: v for k, v in stod.items() if v is not None},
@@ -188,42 +194,82 @@ def write_to_firestore(rt, batch):
             'updatedAt':   now,
         })
 
-        # Glucose history: batch fills older days; live sgs overwrite recent days hi-res.
-        _write_glucose_history(batch.get('rawAgg1d', []))
-        _write_rt_history(rt.get('sgs', []))
+        _write_glucose_history(patient_id, batch_data.get('rawAgg1d', []))
+        _write_rt_history(patient_id, rt.get('sgs', []))
         if rt.get('glucose'):
-            print(f'Firestore: written — sg={rt["glucose"]} (live) '
-                  f'trend={rt.get("trend", "stable")} TIR7d={s7.get("tirNormal")}%')
-        else:
-            print(f'Firestore: sensor gap — glucose left unchanged; stats/pump updated. '
+            print(f'{patient_id}: written sg={rt["glucose"]} trend={rt.get("trend", "stable")} '
                   f'TIR7d={s7.get("tirNormal")}%')
+        else:
+            print(f'{patient_id}: sensor gap — stats/pump updated TIR7d={s7.get("tirNormal")}%')
     except Exception as e:
-        print(f'Firestore write error: {e}')
+        print(f'{patient_id}: Firestore write error: {e}')
+
+
+def run_patient(patient_id, client):
+    """Fetch and store one cycle for a single patient. Returns False if auth failed."""
+    try:
+        batch = client.getRecentData()
+        rt    = client.getRealtimeData()
+        if (rt and rt.get('glucose')) or (batch and batch.get('glucose')):
+            write_to_firestore(patient_id, rt, batch)
+        else:
+            print(f'{patient_id}: no glucose reading')
+        return True
+    except Exception as e:
+        msg = str(e).lower()
+        if 'reauth' in msg or '401' in msg or '403' in msg or 'auth' in msg:
+            return False
+        print(f'{patient_id}: error: {e}')
+        return True
 
 
 def main():
-    print('Starting CareLink uploader...')
+    print('Starting CareLink multi-tenant uploader...')
     _init_firestore()
 
-    cookies = _load_cookies()
-    if not cookies:
-        print('No CareLink cookies found. Seed them once: run the local login + push '
-              'to Firestore (patients/<id>/secrets/carelinkSession) or set COOKIE_JAR env.')
+    patient_ids = fetch_active_patients()
+    if not patient_ids:
+        print('No active patients found. Set PATIENT_ID or add patients with monitoringStatus=active.')
         return
 
-    client = CareLinkClient(cookies=cookies, on_cookies_updated=_save_cookies)
-    print('Ready (web reauth mode — no browser needed)')
+    clients = {}
+    for pid in patient_ids:
+        cookies = _load_cookies(pid)
+        if cookies:
+            clients[pid] = CareLinkClient(
+                cookies=cookies,
+                on_cookies_updated=lambda c, p=pid: _save_cookies(p, c),
+            )
+        else:
+            print(f'{pid}: no cookies found — skipping')
+
+    if not clients:
+        print('No clients with cookies. Exiting.')
+        return
+
+    print(f'Ready — monitoring {len(clients)} patient(s): {list(clients.keys())}')
+    cycle = 0
 
     while True:
-        try:
-            batch = client.getRecentData()       # reauths; multi-day stats + patient name
-            rt    = client.getRealtimeData()      # live SG + pump status
-            if (rt and rt.get('glucose')) or (batch and batch.get('glucose')):
-                write_to_firestore(rt, batch)
-            else:
-                print('No glucose reading')
-        except Exception as e:
-            print(f'Error: {e}')
+        cycle += 1
+        for patient_id, client in list(clients.items()):
+            ok = run_patient(patient_id, client)
+            if not ok:
+                mark_needs_reauth(patient_id)
+
+        # Refresh patient list periodically to pick up newly registered patients.
+        if cycle % REFRESH_CYCLES == 0:
+            new_ids = fetch_active_patients()
+            for pid in new_ids:
+                if pid not in clients:
+                    cookies = _load_cookies(pid)
+                    if cookies:
+                        clients[pid] = CareLinkClient(
+                            cookies=cookies,
+                            on_cookies_updated=lambda c, p=pid: _save_cookies(p, c),
+                        )
+                        print(f'Added new patient: {pid}')
+
         time.sleep(INTERVAL)
 
 
