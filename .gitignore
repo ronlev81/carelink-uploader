@@ -22,3 +22,7 @@ probe_realtime.py
 # Python
 __pycache__/
 *.pyc
+
+# Local discovery script + raw API dumps (PII / health data) - never commit
+probe_insulin.py
+raw_*.json

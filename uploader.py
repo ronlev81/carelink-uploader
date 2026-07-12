@@ -180,6 +180,10 @@ def write_to_firestore(patient_id, rt, batch):
         }.items() if v is not None}
         pump_doc['patientName'] = patient_name
         pump_doc['updatedAt']   = now
+        # Additive insulin-marker fields (manual vs automatic split, last bolus, carbs today).
+        for _k in ('lastBolus', 'insulinTodayManual', 'insulinTodayAuto', 'insulinTodayTotal', 'carbsToday'):
+            if pump.get(_k) is not None:
+                pump_doc[_k] = pump[_k]
         meta.document('latestPump').set(pump_doc, merge=True)
         if sensor_state == 'WARM_UP':
             meta.document('latestPump').update({'sensorAgeHours': fb_firestore.DELETE_FIELD})

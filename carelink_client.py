@@ -96,6 +96,87 @@ def _extract_agg_stats(agg):
     }
 
 
+def _marker_amount(m):
+    """Insulin units (or carb grams for MEAL) for one marker."""
+    t = m.get("type")
+    if t == "INSULIN":
+        return float(m.get("deliveredFastAmount") or 0) + float(m.get("deliveredExtendedAmount") or 0)
+    if t == "AUTO_BASAL_DELIVERY":
+        return float(m.get("bolusAmount") or 0)
+    if t == "MEAL":
+        return float(m.get("amount") or 0)
+    return 0.0
+
+
+def _marker_ms(s, tz_name):
+    """Markers carry the patient's LOCAL wall-clock with a misleading -00:00 offset; anchor
+    that wall-clock to the patient timezone so the timestamp lands at the right hour."""
+    if not s:
+        return None
+    try:
+        from datetime import datetime
+        dt = datetime.fromisoformat(s[:19])   # 'YYYY-MM-DDTHH:MM:SS' — drop any offset
+        try:
+            from zoneinfo import ZoneInfo
+            dt = dt.replace(tzinfo=ZoneInfo(tz_name))
+        except Exception:
+            from datetime import timezone, timedelta
+            dt = dt.replace(tzinfo=timezone(timedelta(hours=3)))
+        return int(dt.timestamp() * 1000)
+    except Exception:
+        return None
+
+
+def summarize_markers(markers, tz_name=None):
+    """Today's insulin breakdown (manual vs automatic) + last bolus, from display.markers.
+
+    - MANUAL/RECOMMENDED INSULIN markers = what the patient/caregiver gave (manual).
+    - AUTOCORRECTION INSULIN + AUTO_BASAL_DELIVERY = what the pump delivered on its own.
+    Purely additive: only used to populate NEW fields; never affects glucose/pump data.
+    """
+    import os
+    from datetime import datetime
+    tz_name = tz_name or os.environ.get("PATIENT_TZ", "Asia/Jerusalem")
+    try:
+        from zoneinfo import ZoneInfo
+        today = datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
+    except Exception:
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+
+    manual = auto_corr = auto_basal = carbs = 0.0
+    for m in markers or []:
+        if (m.get("dateTime") or "")[:10] != today:
+            continue
+        t = m.get("type")
+        if t == "INSULIN":
+            if m.get("activationType") in ("MANUAL", "RECOMMENDED"):
+                manual += _marker_amount(m)
+            else:
+                auto_corr += _marker_amount(m)
+        elif t == "AUTO_BASAL_DELIVERY":
+            auto_basal += _marker_amount(m)
+        elif t == "MEAL":
+            carbs += _marker_amount(m)
+
+    ins = sorted((m for m in (markers or []) if m.get("type") == "INSULIN"),
+                 key=lambda m: m.get("dateTime", ""))
+    last_bolus = None
+    if ins:
+        lb = ins[-1]
+        ms = _marker_ms(lb.get("dateTime"), tz_name)
+        if ms:
+            last_bolus = {"amount": round(_marker_amount(lb), 3), "timestamp": ms}
+
+    auto = auto_corr + auto_basal
+    return {
+        "insulinTodayManual": round(manual, 2),
+        "insulinTodayAuto":   round(auto, 2),
+        "insulinTodayTotal":  round(manual + auto, 2),
+        "carbsToday":         round(carbs),
+        "lastBolus":          last_bolus,
+    }
+
+
 class CareLinkClient:
     def __init__(self, cookies=None, on_cookies_updated=None):
         self.session = requests.Session()
@@ -309,6 +390,15 @@ class CareLinkClient:
             "averageSG":           j.get("averageSG"),
         }
         pump = {k: v for k, v in pump.items() if v is not None}
+
+        # Insulin markers → today's manual/auto breakdown + last bolus. Additive & guarded so
+        # a marker-parsing hiccup can never break the existing glucose/pump write.
+        try:
+            for _k, _v in summarize_markers(j.get("markers")).items():
+                if _v is not None:
+                    pump[_k] = _v
+        except Exception as _e:
+            print(f"marker summary error: {_e}")
 
         # Diagnostic: log all sensor/gst keys so we can spot API field-name changes.
         sensor_keys = {k: v for k, v in j.items() if "sensor" in k.lower() or "gst" in k.lower()}
