@@ -158,7 +158,10 @@ def summarize_markers(markers, tz_name=None):
         elif t == "MEAL":
             carbs += _marker_amount(m)
 
-    ins = sorted((m for m in (markers or []) if m.get("type") == "INSULIN"),
+    # "Last bolus" = the last dose the patient/caregiver actually gave (manual or wizard-
+    # recommended), NOT a tiny automatic correction — that's what "last dose" means to a user.
+    ins = sorted((m for m in (markers or [])
+                  if m.get("type") == "INSULIN" and m.get("activationType") in ("MANUAL", "RECOMMENDED")),
                  key=lambda m: m.get("dateTime", ""))
     last_bolus = None
     if ins:

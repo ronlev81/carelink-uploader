@@ -231,25 +231,23 @@ def main():
     print('Starting CareLink multi-tenant uploader...')
     _init_firestore()
 
-    patient_ids = fetch_active_patients()
-    if not patient_ids:
-        print('No active patients found. Set PATIENT_ID or add patients with monitoringStatus=active.')
-        return
-
     clients = {}
-    for pid in patient_ids:
-        cookies = _load_cookies(pid)
-        if cookies:
-            clients[pid] = CareLinkClient(
-                cookies=cookies,
-                on_cookies_updated=lambda c, p=pid: _save_cookies(p, c),
-            )
-        else:
-            print(f'{pid}: no cookies found — skipping')
-
-    if not clients:
-        print('No clients with cookies. Exiting.')
-        return
+    # Wait for at least one monitorable patient instead of exiting. A transient empty list
+    # (right after a deploy, or a patient missing monitoringStatus='active') must NEVER kill
+    # the service — that downtime is exactly what lets the CareLink session go stale.
+    while not clients:
+        for pid in fetch_active_patients():
+            cookies = _load_cookies(pid)
+            if cookies:
+                clients[pid] = CareLinkClient(
+                    cookies=cookies,
+                    on_cookies_updated=lambda c, p=pid: _save_cookies(p, c),
+                )
+            else:
+                print(f'{pid}: no cookies found — skipping')
+        if not clients:
+            print('No active patients with cookies yet — retrying in 60s...')
+            time.sleep(60)
 
     print(f'Ready — monitoring {len(clients)} patient(s): {list(clients.keys())}')
     cycle = 0
