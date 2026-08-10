@@ -159,6 +159,14 @@ def write_to_firestore(patient_id, rt, batch):
         if rt.get('glucose'):
             vitals['glucose'] = rt['glucose']
             vitals['trend']   = rt.get('trend', 'stable')
+            # The sensor reading's OWN timestamp (from CareLink's lastSG.datetime), not the
+            # upload time. `updatedAt` above keeps advancing every poll cycle even when the
+            # underlying value is stale/unchanged — the app's staleness check needs THIS field
+            # to tell "just read" apart from "the sensor hasn't reported anything new in a
+            # while" (previously indistinguishable, which let a real signal-loss event display
+            # as if it were a fresh reading).
+            if rt.get('tsMs'):
+                vitals['timestamp'] = rt['tsMs']
         meta.document('latestVitals').set(vitals, merge=True)
 
         sensor_state = pump.get('sensorState')
@@ -177,6 +185,12 @@ def write_to_firestore(patient_id, rt, batch):
             'sensorAgeHours':   None if sensor_state == 'WARM_UP' else sensor_age,
             'sensorState':      sensor_state,
             'pumpMode':         'suspended' if pump.get('suspended') else 'auto',
+            # Direct comms flags (see carelink_client.py) — forwarded as-is, False included, so
+            # the app can flag a genuine communication fault fast rather than only inferring one
+            # once the timestamp ages past its staleness threshold.
+            'conduitSensorInRange':   pump.get('conduitSensorInRange'),
+            'pumpCommunicationState': pump.get('pumpCommunicationState'),
+            'gstCommunicationState':  pump.get('gstCommunicationState'),
         }.items() if v is not None}
         pump_doc['patientName'] = patient_name
         pump_doc['updatedAt']   = now

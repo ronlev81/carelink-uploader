@@ -391,6 +391,14 @@ class CareLinkClient:
             "sensorState":         j.get("sensorState"),
             "conduitInRange":      j.get("conduitInRange"),
             "averageSG":           j.get("averageSG"),
+            # Direct communication-status flags. Explicit False here means the device itself is
+            # reporting a comms problem (e.g. the "Lost Sensor Signal" device-status alert) —
+            # distinct from an ordinary gap where these stay True but no new SG has arrived yet.
+            # Kept separately from `sensorState` since that enum has no confirmed "lost signal"
+            # value; these three are self-describing and forwarded as-is, false included.
+            "conduitSensorInRange":   j.get("conduitSensorInRange"),
+            "pumpCommunicationState": j.get("pumpCommunicationState"),
+            "gstCommunicationState":  j.get("gstCommunicationState"),
         }
         pump = {k: v for k, v in pump.items() if v is not None}
 
