@@ -187,10 +187,16 @@ def write_to_firestore(patient_id, rt, batch):
             'pumpMode':         'suspended' if pump.get('suspended') else 'auto',
             # Direct comms flags (see carelink_client.py) — forwarded as-is, False included, so
             # the app can flag a genuine communication fault fast rather than only inferring one
-            # once the timestamp ages past its staleness threshold.
-            'conduitSensorInRange':   pump.get('conduitSensorInRange'),
-            'pumpCommunicationState': pump.get('pumpCommunicationState'),
-            'gstCommunicationState':  pump.get('gstCommunicationState'),
+            # once the timestamp ages past its staleness threshold. IMPORTANT: default to True
+            # (assume healthy) when the raw API omits a flag this cycle, rather than the usual
+            # "drop None, let merge=True keep whatever was there" pattern used above — a fault
+            # flag that goes MISSING (not explicitly False) must not let a stale False from an
+            # earlier cycle linger forever. (Suspected — not confirmed via logs — cause of a real
+            # incident where a healthy 235 mg/dL reading was hidden behind a false "sensor fault"
+            # screen — 2026-07-29. Shipped regardless: safe either way, fixes a real class of bug.)
+            'conduitSensorInRange':   pump.get('conduitSensorInRange', True),
+            'pumpCommunicationState': pump.get('pumpCommunicationState', True),
+            'gstCommunicationState':  pump.get('gstCommunicationState', True),
         }.items() if v is not None}
         pump_doc['patientName'] = patient_name
         pump_doc['updatedAt']   = now
