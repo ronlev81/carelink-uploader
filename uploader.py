@@ -88,8 +88,12 @@ def _load_cookies(patient_id):
                     return cookies
         except Exception as e:
             print(f'{patient_id}: cookie load error: {e}')
-    # Legacy single-patient env fallback.
-    if patient_id == PATIENT_ID:
+    # Legacy single-patient env fallback. PATIENT_ID is unset in the current multi-tenant
+    # deployment (active patients are discovered from Firestore, not this var) — so requiring an
+    # exact match made this fallback unreachable for every real patient (comparing e.g.
+    # 'patient_001' to ''). Apply it whenever PATIENT_ID isn't configured; only require a match
+    # if it IS set, preserving the original per-patient scoping for a future multi-patient setup.
+    if not PATIENT_ID or patient_id == PATIENT_ID:
         env = os.environ.get('COOKIE_JAR')
         if env:
             try:
