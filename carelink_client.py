@@ -49,26 +49,43 @@ def _map_rt_trend(t):
     return "stable"
 
 
+def patient_tz():
+    import os
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(os.environ.get("PATIENT_TZ", "Asia/Jerusalem"))
+    except Exception:
+        from datetime import timezone, timedelta
+        return timezone(timedelta(hours=3))  # fallback if tzdata is missing
+
+
 def _iso_to_ms(s):
+    """display/message datetime -> real UTC ms.
+
+    CareLink writes the patient's LOCAL wall-clock (the pump's clock) with a misleading "Z" —
+    e.g. lastSG '2026-07-12T17:38:00.000Z' in a response whose currentServerTime was 14:50Z;
+    the same quirk as markers (see _marker_ms). Taken at face value every reading landed 3h in
+    the future (2h in winter): a stale reading then looked fresh ("updated just now") for 3 extra
+    hours, the chart ran 3h ahead, and "average of the last N hours" read the wrong window —
+    confirmed in Firestore, where a day doc written at 12:39Z held a reading stamped 15:28Z. So
+    any offset is dropped and the wall-clock anchored to the patient's timezone, as naive values
+    always were.
+    """
     if not s:
         return None
     try:
         from datetime import datetime
-        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
-        if dt.tzinfo is None:
-            # CareLink returns naive datetimes in the patient's LOCAL time. Treating them
-            # as UTC shifted every reading by the local offset (e.g. +3h in Israel), which
-            # made the dashboard chart show future/wrong hours. Anchor to the patient's tz.
-            import os
-            try:
-                from zoneinfo import ZoneInfo
-                dt = dt.replace(tzinfo=ZoneInfo(os.environ.get("PATIENT_TZ", "Asia/Jerusalem")))
-            except Exception:
-                from datetime import timezone, timedelta
-                dt = dt.replace(tzinfo=timezone(timedelta(hours=3)))  # fallback if tzdata is missing
-        return int(dt.timestamp() * 1000)
+        return int(datetime.fromisoformat(s[:19]).replace(tzinfo=patient_tz()).timestamp() * 1000)
     except Exception:
         return None
+
+
+def wallclock_ms_to_utc_ms(ms):
+    """personalWebView sgVal `ts` has the same quirk in numeric form — the local wall-clock encoded
+    as if it were UTC (its readings line up exactly with display/message's wall-clock strings at
+    +0h, not at the real offset). Returns the real UTC ms."""
+    from datetime import datetime, timezone
+    return int(datetime.fromtimestamp(ms / 1000, tz=timezone.utc).replace(tzinfo=patient_tz()).timestamp() * 1000)
 
 # CareLink normally receives pump data every ~5 min (observed ~8 min old at poll time when healthy).
 PUMP_DATA_STALE_MS = 20 * 60 * 1000
@@ -486,16 +503,22 @@ class CareLinkClient:
                   f"sensorAge={pump.get('sensorDurationHours')}h sensorBatt={pump.get('sensorBattery')}%")
             return {"pump": pump, "sgs": []} if pump else None
 
+        ts_ms = _iso_to_ms(last.get("datetime"))
+        read_age_min = round((server_ms - ts_ms) / 60000, 1) if ts_ms and server_ms else None
+        if read_age_min is not None and read_age_min < -10:
+            # A reading can't be newer than CareLink's own clock: the datetime format changed
+            # (see _iso_to_ms), and freshness/staleness would be wrong again.
+            print(f"realtime WARNING: lastSG time is {-read_age_min} min AHEAD of CareLink's clock — datetime format changed?")
         result = {
             "glucose": sg,
             "trend":   _map_rt_trend(j.get("lastSGTrend")),
-            "tsMs":    _iso_to_ms(last.get("datetime")),
+            "tsMs":    ts_ms,
             "sgs":     sgs,
             "pump":    pump,
         }
         _rem_h = pump.get('sensorDurationHours')  # remaining hours (counts down from 168)
         _age_h = (168 - _rem_h) if _rem_h is not None else None
-        print(f"realtime OK — sg={sg} trend={result['trend']} "
+        print(f"realtime OK — sg={sg} readingAge={read_age_min}min trend={result['trend']} "
               f"reservoir={pump.get('reservoirUnits')}u batt={pump.get('batteryPercent')}% "
               f"iob={pump.get('activeInsulin')} "
               f"sensorAge={_age_h}h sensorRemaining={_rem_h}h sensorBatt={pump.get('sensorBattery')}% "

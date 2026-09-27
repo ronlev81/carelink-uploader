@@ -2,7 +2,7 @@ import os
 import json
 import time
 from datetime import datetime, timezone
-from carelink_client import CareLinkClient
+from carelink_client import CareLinkClient, patient_tz, wallclock_ms_to_utc_ms
 
 INTERVAL        = int(os.environ.get('UPLOAD_INTERVAL', '300'))
 PATIENT_ID      = os.environ.get('PATIENT_ID', '')  # legacy single-patient fallback
@@ -113,13 +113,15 @@ def _write_glucose_history(patient_id, agg1d):
         col = _fs.collection('patients').document(patient_id).collection('glucoseByDay')
         for day in agg1d:
             readings = [
-                {'ts': r['ts'] * 1000, 'sgv': r['sg']}
+                {'ts': wallclock_ms_to_utc_ms(r['ts'] * 1000), 'sgv': r['sg']}
                 for r in day.get('sg', {}).get('sgVal', [])
                 if r.get('sg', 0) > 0
             ]
             if not readings:
                 continue
-            date_str = datetime.fromtimestamp(readings[0]['ts'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
+            # Day docs are keyed by the patient's LOCAL date (unchanged: the old wall-clock-as-UTC
+            # ts happened to give the local date; with real UTC ts it has to be explicit).
+            date_str = datetime.fromtimestamp(readings[0]['ts'] / 1000, tz=patient_tz()).strftime('%Y-%m-%d')
             col.document(date_str).set({'readings': readings, 'updatedAt': datetime.now(timezone.utc).isoformat()})
         print(f'{patient_id}: glucose history written ({len(agg1d)} days)')
     except Exception as e:
@@ -133,7 +135,7 @@ def _write_rt_history(patient_id, sgs):
         col = _fs.collection('patients').document(patient_id).collection('glucoseByDay')
         by_day = {}
         for r in sgs:
-            date_str = datetime.fromtimestamp(r['ts'] / 1000, tz=timezone.utc).strftime('%Y-%m-%d')
+            date_str = datetime.fromtimestamp(r['ts'] / 1000, tz=patient_tz()).strftime('%Y-%m-%d')   # local date, as above
             by_day.setdefault(date_str, []).append(r)
         for date_str, readings in by_day.items():
             col.document(date_str).set({'readings': readings, 'updatedAt': datetime.now(timezone.utc).isoformat()})
