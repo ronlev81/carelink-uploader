@@ -141,6 +141,78 @@ def _write_rt_history(patient_id, sgs):
         print(f'{patient_id}: rt-history error: {e}')
 
 
+def _pump_readings(pump, fb_firestore):
+    """latestPump fields derived from one realtime response (the `pump` dict from carelink_client).
+
+    Placeholder-safe: when CareLink is serving placeholders because the pump isn't reporting
+    (pumpDataLive False — see carelink_client._pump_data_live), the readings are DELETED rather
+    than written. Every consumer — patient-app grid and voice answers, dashboard, pumpAlert —
+    already treats a missing field as "no data right now"; the last real values stay in lastKnown.
+    """
+    sensor_state = pump.get('sensorState')
+    SENSOR_LIFE_H = 168
+    raw_remaining = pump.get('sensorDurationHours')
+    sensor_age = (SENSOR_LIFE_H - raw_remaining) if raw_remaining is not None else None
+    live = pump.get('pumpDataLive', True)   # absent (older client) = previous behavior
+    # sensorDurationHours 0 with sensorState UNKNOWN is the "no sensor data" placeholder, not an
+    # expired sensor — written as-is it read as "sensor expired, replace it" (168h) mid-life.
+    sensor_age_ok = (live and sensor_age is not None and sensor_state != 'WARM_UP'
+                     and not (raw_remaining <= 0 and sensor_state in (None, 'UNKNOWN')))
+    doc = {k: v for k, v in {
+        'reservoirLevel':   pump.get('reservoirUnits'),
+        'reservoirPercent': pump.get('reservoirPercent'),
+        'batteryLevel':     pump.get('batteryPercent'),
+        'activeInsulin':    pump.get('activeInsulin'),
+        'sensorBattery':    pump.get('sensorBattery'),
+        'sensorAgeHours':   sensor_age if sensor_age_ok else None,
+        'sensorState':      sensor_state,
+        'pumpMode':         'suspended' if pump.get('suspended') else 'auto',
+        # Direct comms flags (see carelink_client.py) — forwarded as-is, False included, so
+        # the app can flag a genuine communication fault fast rather than only inferring one
+        # once the timestamp ages past its staleness threshold. IMPORTANT: default to True
+        # (assume healthy) when the raw API omits a flag this cycle, rather than the usual
+        # "drop None, let merge=True keep whatever was there" pattern used above — a fault
+        # flag that goes MISSING (not explicitly False) must not let a stale False from an
+        # earlier cycle linger forever. (Suspected — not confirmed via logs — cause of a real
+        # incident where a healthy 235 mg/dL reading was hidden behind a false "sensor fault"
+        # screen — 2026-07-29. Shipped regardless: safe either way, fixes a real class of bug.)
+        'conduitSensorInRange':   pump.get('conduitSensorInRange', True),
+        'pumpCommunicationState': pump.get('pumpCommunicationState', True),
+        'gstCommunicationState':  pump.get('gstCommunicationState', True),
+    }.items() if v is not None}
+    # Additive insulin-marker fields (manual vs automatic split, last bolus, carbs today).
+    for _k in ('lastBolus', 'insulinTodayManual', 'insulinTodayAuto', 'insulinTodayTotal', 'carbsToday'):
+        if pump.get(_k) is not None:
+            doc[_k] = pump[_k]
+
+    doc['pumpDataLive'] = live
+    if live:
+        doc['pumpDataTs'] = pump.get('pumpDataTs')
+        # The last REAL values, kept for display ("last known ... as of") while the pump isn't
+        # reporting. All written every live cycle (None -> null) so they share one `ts` — except
+        # lastBolus, which carries its own timestamp and only appears in cycles whose markers
+        # include it (merge=True keeps the previous one otherwise).
+        doc['lastKnown'] = {k: doc.get(k) for k in (
+            'reservoirLevel', 'reservoirPercent', 'batteryLevel', 'sensorBattery', 'sensorAgeHours')}
+        doc['lastKnown']['ts'] = pump.get('pumpDataTs')
+        if doc.get('lastBolus') is not None:
+            doc['lastKnown']['lastBolus'] = doc['lastBolus']
+    else:
+        # Not written: CareLink's placeholders (reservoir 0, battery 0/-1, active insulin -1, ...)
+        # nor stale earlier values that would look current.
+        for _k in ('reservoirLevel', 'reservoirPercent', 'batteryLevel', 'activeInsulin', 'sensorBattery',
+                   'pumpMode', 'lastBolus', 'insulinTodayManual', 'insulinTodayAuto', 'insulinTodayTotal', 'carbsToday'):
+            doc[_k] = fb_firestore.DELETE_FIELD
+    if not sensor_age_ok:
+        doc['sensorAgeHours'] = fb_firestore.DELETE_FIELD   # warm-up, placeholder or pump not reporting
+    if pump.get('sensorBattery') is None and (
+            pump.get('conduitSensorInRange') is False or pump.get('gstCommunicationState') is False):
+        doc['sensorBattery'] = fb_firestore.DELETE_FIELD    # sensor silent: don't keep a stale level
+    # Merged into ONE latestPump write per cycle (was a set + a separate delete-update during
+    # warm-up): each write fires pumpAlert, whose comm-fault debounce counts writes as poll cycles.
+    return doc
+
+
 def write_to_firestore(patient_id, rt, batch):
     if not _fs:
         return
@@ -173,44 +245,19 @@ def write_to_firestore(patient_id, rt, batch):
                 vitals['timestamp'] = rt['tsMs']
         meta.document('latestVitals').set(vitals, merge=True)
 
-        sensor_state = pump.get('sensorState')
-        SENSOR_LIFE_H = 168
-        raw_remaining = pump.get('sensorDurationHours')
-        sensor_age = (SENSOR_LIFE_H - raw_remaining) if raw_remaining is not None else None
         pump_doc = {k: v for k, v in {
-            'pumpModel':        pump.get('pumpModel') or pi.get('pumpModel'),
-            'sensorModel':      pi.get('sensorModel'),
-            'autoMode':         stod.get('autoMode'),
-            'reservoirLevel':   pump.get('reservoirUnits'),
-            'reservoirPercent': pump.get('reservoirPercent'),
-            'batteryLevel':     pump.get('batteryPercent'),
-            'activeInsulin':    pump.get('activeInsulin'),
-            'sensorBattery':    pump.get('sensorBattery'),
-            'sensorAgeHours':   None if sensor_state == 'WARM_UP' else sensor_age,
-            'sensorState':      sensor_state,
-            'pumpMode':         'suspended' if pump.get('suspended') else 'auto',
-            # Direct comms flags (see carelink_client.py) — forwarded as-is, False included, so
-            # the app can flag a genuine communication fault fast rather than only inferring one
-            # once the timestamp ages past its staleness threshold. IMPORTANT: default to True
-            # (assume healthy) when the raw API omits a flag this cycle, rather than the usual
-            # "drop None, let merge=True keep whatever was there" pattern used above — a fault
-            # flag that goes MISSING (not explicitly False) must not let a stale False from an
-            # earlier cycle linger forever. (Suspected — not confirmed via logs — cause of a real
-            # incident where a healthy 235 mg/dL reading was hidden behind a false "sensor fault"
-            # screen — 2026-07-29. Shipped regardless: safe either way, fixes a real class of bug.)
-            'conduitSensorInRange':   pump.get('conduitSensorInRange', True),
-            'pumpCommunicationState': pump.get('pumpCommunicationState', True),
-            'gstCommunicationState':  pump.get('gstCommunicationState', True),
+            'pumpModel':   pump.get('pumpModel') or pi.get('pumpModel'),
+            'sensorModel': pi.get('sensorModel'),
+            'autoMode':    stod.get('autoMode'),
         }.items() if v is not None}
         pump_doc['patientName'] = patient_name
         pump_doc['updatedAt']   = now
-        # Additive insulin-marker fields (manual vs automatic split, last bolus, carbs today).
-        for _k in ('lastBolus', 'insulinTodayManual', 'insulinTodayAuto', 'insulinTodayTotal', 'carbsToday'):
-            if pump.get(_k) is not None:
-                pump_doc[_k] = pump[_k]
+        # No realtime response this cycle (fetch failed): leave the readings AND the comms flags as
+        # they were — writing defaults here used to report "all healthy" (flags True) with no data
+        # behind it, which also re-armed pumpAlert's comm-fault alert mid-outage.
+        if pump:
+            pump_doc.update(_pump_readings(pump, fb_firestore))
         meta.document('latestPump').set(pump_doc, merge=True)
-        if sensor_state == 'WARM_UP':
-            meta.document('latestPump').update({'sensorAgeHours': fb_firestore.DELETE_FIELD})
 
         meta.document('latestStats').set({
             'today': {k: v for k, v in stod.items() if v is not None},
@@ -228,7 +275,9 @@ def write_to_firestore(patient_id, rt, batch):
             print(f'{patient_id}: written sg={rt["glucose"]} trend={rt.get("trend", "stable")} '
                   f'TIR7d={s7.get("tirNormal")}%')
         else:
-            print(f'{patient_id}: sensor gap — stats/pump updated TIR7d={s7.get("tirNormal")}%')
+            note = (' (no realtime response — pump fields left as they were)' if not pump
+                    else '' if pump.get('pumpDataLive', True) else ' (pump not reporting — readings cleared)')
+            print(f'{patient_id}: sensor gap — stats/pump updated{note} TIR7d={s7.get("tirNormal")}%')
     except Exception as e:
         print(f'{patient_id}: Firestore write error: {e}')
 

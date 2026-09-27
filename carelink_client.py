@@ -70,6 +70,44 @@ def _iso_to_ms(s):
     except Exception:
         return None
 
+# CareLink normally receives pump data every ~5 min (observed ~8 min old at poll time when healthy).
+PUMP_DATA_STALE_MS = 20 * 60 * 1000
+
+
+def _num(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _pump_data_live(j):
+    """(live, reason) — are the pump fields in this display/message response REAL readings?
+
+    When the pump stops reporting to CareLink (pump<->phone link lost), the endpoint does not omit
+    the pump fields — it fills them with placeholders, all at once. Observed live 2026-09-24..27
+    (3-day outage): reservoirRemainingUnits 0.0, medicalDeviceBatteryLevelPercent 0 or -1,
+    activeInsulin.amount -1, sensorDurationHours 0, sensorState UNKNOWN, pumpCommunicationState /
+    conduitSensorInRange / gstCommunicationState False — minutes after a healthy 74.6u / 75% /
+    100h-left cycle. Written as-is, those became "reservoir 0" (a false low-reservoir push, 3 times
+    in 9 days), "battery 0%", "active insulin -1" and "sensor expired".
+
+    Any ONE signal marks the cycle not-live — a real pump can report an empty reservoir OR a flat
+    battery, but not both at once while still communicating, and never a negative level.
+    """
+    if j.get("pumpCommunicationState") is False:
+        return False, "pumpCommunicationState=False"
+    if j.get("conduitMedicalDeviceInRange") is False:
+        return False, "conduitMedicalDeviceInRange=False"
+    batt, res = _num(j.get("medicalDeviceBatteryLevelPercent")), _num(j.get("reservoirRemainingUnits"))
+    iob = _num((j.get("activeInsulin") or {}).get("amount"))
+    if (batt is not None and batt < 0) or (res is not None and res < 0) or (iob is not None and iob < 0):
+        return False, "negative placeholder value"
+    if res is not None and batt is not None and res <= 0 and batt <= 0:
+        return False, "reservoir and battery both 0"
+    last, now = _num(j.get("lastMedicalDeviceDataUpdateServerTime")), _num(j.get("currentServerTime"))
+    if last and now and last > 0 and now - last > PUMP_DATA_STALE_MS:
+        return False, f"no pump data for {round((now - last) / 60000)} min"
+    return True, None
+
+
 # Refresh the token when it has less than this many seconds of life left.
 REFRESH_MARGIN_SEC = 8 * 60
 
@@ -377,7 +415,8 @@ class CareLinkClient:
             return None
 
     def _parse_realtime(self, j):
-        # Extract pump data unconditionally — present even during sensor gaps.
+        # Extract pump data unconditionally — present even during sensor gaps. Whether those
+        # values are REAL is decided by _pump_data_live() below and enforced in write_to_firestore.
         ai = j.get("activeInsulin") or {}
         pump = {
             "reservoirUnits":      j.get("reservoirRemainingUnits"),
@@ -401,6 +440,19 @@ class CareLinkClient:
             "gstCommunicationState":  j.get("gstCommunicationState"),
         }
         pump = {k: v for k, v in pump.items() if v is not None}
+
+        live, why = _pump_data_live(j)
+        pump["pumpDataLive"] = live
+        pump_ms, server_ms = _num(j.get("lastMedicalDeviceDataUpdateServerTime")), _num(j.get("currentServerTime"))
+        if live:
+            # CareLink's own "last received data from the pump" time (UTC ms) when it has one, else now.
+            pump["pumpDataTs"] = int(pump_ms) if pump_ms and pump_ms > 0 else int(time.time() * 1000)
+        # Ground truth for the next incident: the raw comms/freshness fields, compact, no PII.
+        age_min = round((server_ms - pump_ms) / 60000, 1) if pump_ms and server_ms and pump_ms > 0 else None
+        print(f"realtime comms: live={live}{f' ({why})' if why else ''} pumpComm={j.get('pumpCommunicationState')} "
+              f"conduitInRange={j.get('conduitInRange')} conduitPumpInRange={j.get('conduitMedicalDeviceInRange')} "
+              f"conduitSensorInRange={j.get('conduitSensorInRange')} gstComm={j.get('gstCommunicationState')} "
+              f"status={j.get('systemStatusMessage')} pumpDataAgeMin={age_min}")
 
         # Insulin markers → today's manual/auto breakdown + last bolus. Additive & guarded so
         # a marker-parsing hiccup can never break the existing glucose/pump write.
@@ -428,8 +480,8 @@ class CareLinkClient:
         last = j.get("lastSG") or {}
         sg = last.get("sg")
         if not sg or sg <= 0:
-            # Sensor gap: no live glucose but pump data is still valid — return it.
-            print(f"realtime: sensor gap — no SG, pump-only "
+            # Sensor gap: no live glucose, but the pump data may still be real (pumpDataLive says) — return it.
+            print(f"realtime: sensor gap — no SG, pump-only (pump data {'live' if live else 'NOT live'}) "
                   f"reservoir={pump.get('reservoirUnits')}u batt={pump.get('batteryPercent')}% "
                   f"sensorAge={pump.get('sensorDurationHours')}h sensorBatt={pump.get('sensorBattery')}%")
             return {"pump": pump, "sgs": []} if pump else None
