@@ -9,8 +9,8 @@ cookie_jar.txt
 .chrome-profile/
 logindata.json
 
-# Local-only helper/exploration scripts (not needed on Railway)
-web_session.py
+# Local-only helper/exploration scripts (not needed on Railway).
+# web_session.py IS committed: reseed.ps1 depends on it (it holds no credentials — cookies go to web_state.json).
 find_refresh.py
 find_endpoints.py
 test_login.py
